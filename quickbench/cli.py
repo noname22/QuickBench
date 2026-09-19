@@ -10,9 +10,8 @@ from pathlib import Path
 from . import __version__
 from .clients import API_STYLES
 from .problems import SETS, TAGS, ProblemError, load_problems
-from .report import (GradeError, find_result_dirs, problem_states, record_grade, render_table, response_path,
-                     summarize)
-from .runner import read_json, run, write_json
+from .report import GradeError, find_result_dirs, problem_states, record_grade, render_table, summarize
+from .runner import read_json, response_path, run, write_json
 
 
 def build_parser() -> argparse.ArgumentParser:

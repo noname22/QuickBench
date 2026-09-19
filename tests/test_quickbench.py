@@ -257,6 +257,30 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("different settings", out)
 
+    def test_set_keeps_its_own_results(self):
+        # A set directory with a results/ folder (e.g. a private repository) stores its responses and grades itself.
+        private = self.root / "problems/private"
+        (private / "results").mkdir(parents=True)
+        (private / "int-secret.toml").write_text(PLAIN.replace('"int-plain"', '"int-secret"'))
+        name = "Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
+        with FakeServer() as server:
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m")
+            self.assertEqual(code, 0, out)
+        store = private / "results" / name
+        self.assertTrue((store / "responses/int-secret.json").exists())
+        self.assertTrue((store / "run.json").exists())
+        self.assertFalse((self.root / "results" / name / "responses/private").exists())
+        self.assertTrue((self.root / "results" / name / "responses/public/int-plain.json").exists())
+        run = json.loads((self.root / "results" / name / "run.json").read_text())
+        self.assertEqual(run["totals"]["by_set"]["private"]["problems"], 1)
+
+        verdict = json.dumps({"criteria": {"right": {"points": 2, "rationale": "right"}}})
+        code, out = self.cli("grade", name, "int-secret", "--grader", "t", stdin=verdict)
+        self.assertEqual(code, 0, out)
+        self.assertTrue((store / "grades/int-secret.json").exists())
+        code, out = self.cli("status")
+        self.assertIn("1 graded, 0 error, 2 ungraded", out)
+
     def test_generic_server_and_api_errors(self):
         with FakeServer(llamacpp=False) as server:
             server.httpd.fail_with = 500

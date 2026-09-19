@@ -102,13 +102,40 @@ def run_problem(problem: Problem, ctx: dict) -> dict:
     return response
 
 
-def compute_totals(result_dir: Path) -> dict:
-    """Token totals over every response in the directory (so resumed runs add up correctly)."""
+def set_store(result_dir: Path, problem: Problem) -> Path | None:
+    """Where a problem set keeps its own results, if it does.
+
+    A set that lives in its own (private) repository can hold the responses and grades for
+    its problems too: if problems/<set>/results/ exists they go there instead of results/.
+    """
+    store = problem.path.parent / "results"
+    return store / result_dir.name if store.is_dir() else None
+
+
+def response_path(result_dir: Path, problem: Problem) -> Path:
+    store = set_store(result_dir, problem)
+    if store:
+        return store / "responses" / f"{problem.id}.json"
+    return result_dir / "responses" / problem.set / f"{problem.id}.json"
+
+
+def grade_path(result_dir: Path, problem: Problem) -> Path:
+    store = set_store(result_dir, problem)
+    if store:
+        return store / "grades" / f"{problem.id}.json"
+    return result_dir / "grades" / problem.set / f"{problem.id}.json"
+
+
+def compute_totals(result_dir: Path, problems: list[Problem]) -> dict:
+    """Token totals over every recorded response (so resumed runs add up correctly)."""
     totals = {"problems": 0, "errors": 0, "prompt_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
               "reasoning_tokens_estimated": False, "duration_s": 0.0, "by_set": {}}
-    for path in sorted((result_dir / "responses").glob("*/*.json")):
+    for problem in problems:
+        path = response_path(result_dir, problem)
+        if not path.exists():
+            continue
         response = read_json(path)
-        for bucket in (totals, totals["by_set"].setdefault(path.parent.name, {
+        for bucket in (totals, totals["by_set"].setdefault(problem.set, {
                 "problems": 0, "errors": 0, "prompt_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0})):
             bucket["problems"] += 1
             bucket["errors"] += bool(response.get("error"))
@@ -206,6 +233,9 @@ def run(args) -> int:
         if changed:
             for stale in ("responses", "grades"):
                 shutil.rmtree(result_dir / stale, ignore_errors=True)
+            for problem in all_problems:  # covers sets that keep their results with the problems
+                response_path(result_dir, problem).unlink(missing_ok=True)
+                grade_path(result_dir, problem).unlink(missing_ok=True)
             (result_dir / "summary.json").unlink(missing_ok=True)
         else:
             started_at = previous.get("started_at", started_at)
@@ -219,7 +249,7 @@ def run(args) -> int:
 
     todo = []
     for problem in problems:
-        path = result_dir / "responses" / problem.set / f"{problem.id}.json"
+        path = response_path(result_dir, problem)
         if path.exists() and not args.force:
             previous = read_json(path)
             stale = previous.get("problem_hash") != problem.hash
@@ -231,8 +261,13 @@ def run(args) -> int:
     ctx["counter"] = TokenCounter(root, {"Authorization": f"Bearer {api_key}"} if api_key else {}, info["tokenize"])
 
     def finalize(finished: bool) -> None:
-        write_json(run_path, {**run_info, "problem_sets": set_hashes(all_problems), "started_at": started_at,
-                              "finished_at": now() if finished else None, "totals": compute_totals(result_dir)})
+        info = {**run_info, "problem_sets": set_hashes(all_problems), "started_at": started_at,
+                "finished_at": now() if finished else None, "totals": compute_totals(result_dir, all_problems)}
+        write_json(run_path, info)
+        # Results kept with a problem set should say what produced them without the main results directory.
+        for store in {set_store(result_dir, p) for p in all_problems} - {None}:
+            if (store / "responses").is_dir():
+                write_json(store / "run.json", info)
 
     finalize(False)
     done = 0
@@ -242,7 +277,7 @@ def run(args) -> int:
         response = run_problem(problem, ctx)
         write_json(path, response)
         # A new response invalidates any grade of the old one.
-        (result_dir / "grades" / problem.set / f"{problem.id}.json").unlink(missing_ok=True)
+        grade_path(result_dir, problem).unlink(missing_ok=True)
         return response
 
     pool = ThreadPoolExecutor(max_workers=max(1, args.parallel))
@@ -275,9 +310,9 @@ def run(args) -> int:
         print(f"error: {reason}{failed}\nRerun the command to resume.", file=sys.stderr)
         return 2
 
-    complete = all((result_dir / "responses" / p.set / f"{p.id}.json").exists() for p in all_problems)
+    complete = all(response_path(result_dir, p).exists() for p in all_problems)
     finalize(complete)
-    totals = compute_totals(result_dir)
+    totals = compute_totals(result_dir, all_problems)
     print(f"Done. {totals['problems']} responses in {result_dir} ({totals['errors']} errors), "
           f"{totals['output_tokens']} output tokens, {totals['reasoning_tokens']} reasoning tokens"
           f"{' (estimated)' if totals['reasoning_tokens_estimated'] else ''}.")
