@@ -16,7 +16,8 @@ from pathlib import Path
 
 from . import __version__
 from .clients import CONVERSATIONS, ApiError, ConnectionFailed, RunAborted, normalize_base_url
-from .modelinfo import TokenCounter, describe_kv_cache, parse_model_name, probe, result_dir_name
+from .modelinfo import (TokenCounter, describe_kv_cache, parse_model_name, probe, result_dir_name,
+                        safe_dir_name)
 from .problems import TAGS, Problem, load_problems
 from .tools import MockTools
 
@@ -130,11 +131,29 @@ def response_path(result_dir: Path, problem: Problem) -> Path:
     return result_dir / "responses" / problem.set / f"{problem.id}.json"
 
 
-def grade_path(result_dir: Path, problem: Problem) -> Path:
+def grades_dir(result_dir: Path, problem: Problem) -> Path:
+    """Directory holding one sub-directory per grader for this problem's set."""
     store = set_store(result_dir, problem)
-    if store:
-        return store / "grades" / f"{problem.id}.json"
-    return result_dir / "grades" / problem.set / f"{problem.id}.json"
+    return store / "grades" if store else result_dir / "grades" / problem.set
+
+
+def grader_dir_name(grader: str) -> str:
+    return safe_dir_name(grader)
+
+
+def grade_path(result_dir: Path, problem: Problem, grader: str) -> Path:
+    return grades_dir(result_dir, problem) / grader_dir_name(grader) / f"{problem.id}.json"
+
+
+def all_grade_paths(result_dir: Path, problem: Problem) -> list[Path]:
+    """This problem's grade files from every grader."""
+    return sorted(grades_dir(result_dir, problem).glob(f"*/{problem.id}.json"))
+
+
+def list_graders(result_dir: Path, problems: list[Problem]) -> list[str]:
+    """Directory names of all graders that have graded anything in this result."""
+    dirs = {grades_dir(result_dir, p) for p in problems}
+    return sorted({g.name for d in dirs if d.is_dir() for g in d.iterdir() if g.is_dir() and any(g.glob("*.json"))})
 
 
 def compute_totals(result_dir: Path, problems: list[Problem]) -> dict:
@@ -246,7 +265,8 @@ def run(args) -> int:
                 shutil.rmtree(result_dir / stale, ignore_errors=True)
             for problem in all_problems:  # covers sets that keep their results with the problems
                 response_path(result_dir, problem).unlink(missing_ok=True)
-                grade_path(result_dir, problem).unlink(missing_ok=True)
+                for path in all_grade_paths(result_dir, problem):
+                    path.unlink()
             (result_dir / "summary.json").unlink(missing_ok=True)
         else:
             started_at = previous.get("started_at", started_at)
@@ -288,7 +308,8 @@ def run(args) -> int:
         response = run_problem(problem, ctx)
         write_json(path, response)
         # A new response invalidates any grade of the old one.
-        grade_path(result_dir, problem).unlink(missing_ok=True)
+        for stale_grade in all_grade_paths(result_dir, problem):
+            stale_grade.unlink()
         return response
 
     pool = ThreadPoolExecutor(max_workers=max(1, args.parallel))

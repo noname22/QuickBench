@@ -10,8 +10,9 @@ from pathlib import Path
 from . import __version__
 from .clients import API_STYLES
 from .problems import SETS, TAGS, ProblemError, load_problems
-from .report import GradeError, find_result_dirs, problem_states, record_grade, render_table, summarize
-from .runner import read_json, response_path, run, write_json
+from .report import (GradeError, compare_graders, find_result_dirs, problem_states, record_grade, render_table,
+                     summarize)
+from .runner import grader_dir_name, list_graders, read_json, response_path, run, write_json
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("status", help="show graded/ungraded responses per result")
     p.add_argument("result", nargs="?", help="result directory (default: all)")
+    p.add_argument("--grader", help="show the work left for this grader (default: every grader that has graded)")
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("packet", help="print the grading packet for one response")
@@ -74,12 +76,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("grade", help="record a grade; reads the verdict as JSON from stdin")
     p.add_argument("result")
     p.add_argument("problem_id")
-    p.add_argument("--grader", required=True, help="who graded, e.g. the grading model's name")
+    p.add_argument("--grader", required=True,
+                   help="who graded, e.g. the grading model's name; grades are kept separately per grader")
     p.set_defaults(func=cmd_grade)
 
     p = sub.add_parser("report", help="aggregate grades into summary.json and print a comparison")
     p.add_argument("results", nargs="*", help="result directories (default: all)")
+    p.add_argument("--grader", help="only report this grader's scores (default: one row per grader)")
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("compare-graders", help="show how far several graders agree on the same responses")
+    p.add_argument("result")
+    p.add_argument("--baseline", help="grader to compare the others against (default: the first by name)")
+    p.set_defaults(func=cmd_compare_graders)
     return parser
 
 
@@ -143,14 +152,18 @@ def cmd_status(args) -> int:
     if not dirs:
         print("No results found.")
     for result_dir in dirs:
-        states = problem_states(result_dir, problems)
-        counts = {name: sum(s["state"] == name for s in states)
-                  for name in ("graded", "error", "ungraded", "stale", "missing")}
-        print(f"{result_dir}: " + ", ".join(f"{n} {name}" for name, n in counts.items()))
-        for name in ("ungraded", "stale", "missing"):
-            ids = [f"{s['problem'].set}/{s['problem'].id}" for s in states if s["state"] == name]
-            if ids and (name == "ungraded" or args.result):
-                print(f"  {name}: " + " ".join(ids))
+        # Grades are kept per grader; a result nobody has graded yet is all "ungraded".
+        graders = [grader_dir_name(args.grader)] if args.grader else list_graders(result_dir, problems) or [None]
+        for grader in graders:
+            states = problem_states(result_dir, problems, grader)
+            counts = {name: sum(s["state"] == name for s in states)
+                      for name in ("graded", "error", "ungraded", "stale", "missing")}
+            label = f" [grader {grader}]" if grader else ""
+            print(f"{result_dir}{label}: " + ", ".join(f"{n} {name}" for name, n in counts.items()))
+            for name in ("ungraded", "stale", "missing"):
+                ids = [f"{s['problem'].set}/{s['problem'].id}" for s in states if s["state"] == name]
+                if ids and (name == "ungraded" or args.result):
+                    print(f"  {name}: " + " ".join(ids))
     return 0
 
 
@@ -193,19 +206,37 @@ def cmd_grade(args) -> int:
 def cmd_report(args) -> int:
     problems = load_problems(Path(args.problems_dir))
     dirs = [_result_dir(args, r) for r in args.results] or find_result_dirs(Path(args.results_dir))
-    if not dirs:
-        print("No results found.")
-        return 0
     summaries = []
     for result_dir in dirs:
-        summary = summarize(result_dir, problems)
-        write_json(result_dir / "summary.json", summary)
-        summaries.append(summary)
+        # "-" stands for "nobody yet": failed requests score 0 even before anyone has graded.
+        graders = [grader_dir_name(args.grader)] if args.grader else list_graders(result_dir, problems) or ["-"]
+        per_grader = {grader: summarize(result_dir, problems, grader) for grader in graders}
+        if per_grader and not args.grader:
+            write_json(result_dir / "summary.json", {"result": result_dir.name, "graders": per_grader})
+        summaries.extend(per_grader.values())
+    if not summaries:
+        print("No graded results found.")
+        return 0
     scopes = ["combined"] + [s for s in SETS if any(s in summary["overall"] for summary in summaries)]
     if len(scopes) == 2:  # only one set present: combined would repeat it
         scopes = scopes[1:]
     for scope in scopes:
         print(f"## Scores (%): {scope}\n\n{render_table(summaries, scope)}\n")
+    return 0
+
+
+def cmd_compare_graders(args) -> int:
+    problems = load_problems(Path(args.problems_dir))
+    result_dir = _result_dir(args, args.result)
+    graders = list_graders(result_dir, problems)
+    if args.baseline:
+        baseline = grader_dir_name(args.baseline)
+        if baseline not in graders:
+            raise SystemExit(f"error: no grades by {args.baseline!r} in {result_dir} (graders: {', '.join(graders)})")
+        graders = [baseline] + [g for g in graders if g != baseline]
+    if len(graders) < 2:
+        raise SystemExit(f"error: {result_dir} has grades from {len(graders)} grader(s); two are needed to compare")
+    print(compare_graders(result_dir, problems, graders))
     return 0
 
 
