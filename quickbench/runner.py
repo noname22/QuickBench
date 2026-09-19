@@ -6,10 +6,11 @@ import fnmatch
 import hashlib
 import json
 import os
+import queue
 import shutil
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,16 +61,17 @@ def response_is_current(response: dict, problem: Problem) -> bool:
     return response.get("problem_hash") == problem.hash  # recorded before prompt hashes existed
 
 
-def run_problem(problem: Problem, ctx: dict) -> dict:
+def run_problem(problem: Problem, ctx: dict, endpoint: dict) -> dict:
+    """One conversation, held entirely with one endpoint ({"root": url, "counter": TokenCounter})."""
     conv = CONVERSATIONS[ctx["api"]](
-        ctx["root"], ctx["model"], ctx["api_key"], problem.system, problem.tools,
+        endpoint["root"], ctx["model"], ctx["api_key"], problem.system, problem.tools,
         problem.max_tokens or ctx["max_tokens"], ctx["sampling"], ctx["extra_body"], ctx["timeout"],
     )
     mock = MockTools(problem.tools)
-    counter: TokenCounter = ctx["counter"]
+    counter: TokenCounter = endpoint["counter"]
     response = {"problem_id": problem.id, "set": problem.set, "problem_hash": problem.hash,
                 "prompt_hash": problem.prompt_hash, "started_at": now(),
-                "error": None, "aborted": None, "turns": []}
+                "endpoint": endpoint["root"], "error": None, "aborted": None, "turns": []}
     usage = {"prompt_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0, "reasoning_tokens_estimated": False}
     started = time.monotonic()
     try:
@@ -196,8 +198,13 @@ def set_hashes(problems: list[Problem]) -> dict:
     return out
 
 
+# What must agree between endpoints for them to count as the same model under test.
+SAME_MODEL_KEYS = ("reported_model", "quantization", "engine", "n_params")
+
+
 def run(args) -> int:
-    root = normalize_base_url(args.base_url)
+    roots = list(dict.fromkeys(normalize_base_url(url) for url in args.base_url))
+    root = roots[0]
     api_key = args.api_key or os.environ.get("QUICKBENCH_API_KEY")
     try:
         extra_body = json.loads(args.extra_body) if args.extra_body else {}
@@ -215,14 +222,25 @@ def run(args) -> int:
         print("error: no problems selected", file=sys.stderr)
         return 2
 
-    print(f"Probing {root} ...")
-    try:
-        info = probe(root, args.api, api_key)
-    except ConnectionFailed as e:
-        print(f"error: cannot reach the server: {e}", file=sys.stderr)
-        return 2
+    infos = {}
+    for url in roots:
+        print(f"Probing {url} ...")
+        try:
+            infos[url] = probe(url, args.api, api_key)
+        except ConnectionFailed as e:
+            print(f"error: cannot reach the server: {e}", file=sys.stderr)
+            return 2
+    info = infos[root]
+    for url in roots[1:]:
+        different = [k for k in SAME_MODEL_KEYS if infos[url][k] != info[k]]
+        if different:
+            print("error: the endpoints do not serve the same model, so their responses cannot be mixed:",
+                  file=sys.stderr)
+            for key in different:
+                print(f"  {key}: {root} reports {info[key]!r}, {url} reports {infos[url][key]!r}", file=sys.stderr)
+            return 2
 
-    ctx = {"api": args.api, "root": root, "model": args.model, "api_key": api_key, "max_tokens": args.max_tokens,
+    ctx = {"api": args.api, "model": args.model, "api_key": api_key, "max_tokens": args.max_tokens,
            "sampling": sampling, "extra_body": extra_body, "timeout": args.timeout}
 
     reported = info["reported_model"]
@@ -253,7 +271,7 @@ def run(args) -> int:
         "kv_cache": {"k": args.cache_type_k, "v": args.cache_type_v,
                      "description": describe_kv_cache(args.cache_type_k, args.cache_type_v)},
         "engine": args.engine or info["engine"] or "unknown",
-        "endpoint": {"api": args.api, "base_url": root, "requested_model": args.model, "n_ctx": info["n_ctx"]},
+        "endpoint": {"api": args.api, "base_urls": roots, "requested_model": args.model, "n_ctx": info["n_ctx"]},
         "generation": {"max_tokens": args.max_tokens, "sampling_overrides": sampling,
                        "server_sampling_defaults": info["server_sampling_defaults"], "extra_body": extra_body},
     }
@@ -297,7 +315,8 @@ def run(args) -> int:
         todo.append((problem, path))
     print(f"Problems: {len(todo)} to run, {len(problems) - len(todo)} already recorded")
 
-    ctx["counter"] = TokenCounter(root, {"Authorization": f"Bearer {api_key}"} if api_key else {}, info["tokenize"])
+    auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    endpoints = [{"root": url, "counter": TokenCounter(url, auth, infos[url]["tokenize"])} for url in roots]
 
     def finalize(finished: bool) -> None:
         # Every set's part of the result says what produced it, so each can be read (and published) on its own.
@@ -307,42 +326,91 @@ def run(args) -> int:
             write_json(directory / "run.json", info)
 
     finalize(False)
-    done = 0
+
+    # Each endpoint works through a shared queue, one conversation at a time (times --parallel), so a faster
+    # server simply takes more problems. A conversation stays on one endpoint from the first turn to the last.
+    pending: queue.Queue = queue.Queue()
+    for item in todo:
+        pending.put(item)
+    events: queue.Queue = queue.Queue()
+    stop = threading.Event()
+
+    in_flight = 0
+    lock = threading.Lock()
+
+    def worker(endpoint: dict) -> None:
+        nonlocal in_flight
+        try:
+            while not stop.is_set():
+                try:
+                    with lock:
+                        problem, path = pending.get_nowait()
+                        in_flight += 1
+                except queue.Empty:
+                    # Work held by another endpoint comes back to the queue if that endpoint goes away.
+                    if in_flight == 0:
+                        return
+                    time.sleep(0.2)
+                    continue
+                try:
+                    response = run_problem(problem, ctx, endpoint)
+                except ConnectionFailed as e:
+                    with lock:
+                        pending.put((problem, path))  # another endpoint can still take it
+                        in_flight -= 1
+                    events.put(("endpoint-failed", endpoint["root"], e))
+                    return
+                except RunAborted as e:
+                    with lock:
+                        in_flight -= 1
+                    events.put(("fatal", endpoint["root"], e))
+                    return
+                with lock:
+                    in_flight -= 1
+                write_json(path, response)
+                # A new response invalidates any grade of the old one.
+                for stale_grade in all_grade_paths(result, problem):
+                    stale_grade.unlink()
+                events.put(("done", problem, response))
+        finally:
+            events.put(("exit", endpoint["root"], None))
+
+    workers = [threading.Thread(target=worker, args=(endpoint,), daemon=True)
+               for endpoint in endpoints for _ in range(max(1, args.parallel))]
+    for thread in workers:
+        thread.start()
+
+    done, active = 0, len(workers)
     failed: RunAborted | None = None
-
-    def work(problem: Problem, path: Path) -> dict:
-        response = run_problem(problem, ctx)
-        write_json(path, response)
-        # A new response invalidates any grade of the old one.
-        for stale_grade in all_grade_paths(result, problem):
-            stale_grade.unlink()
-        return response
-
-    pool = ThreadPoolExecutor(max_workers=max(1, args.parallel))
-    futures = {pool.submit(work, problem, path): problem for problem, path in todo}
     try:
-        for future in as_completed(futures):
-            problem = futures[future]
-            try:
-                response = future.result()
-            except RunAborted as e:
-                failed = e
-                break
-            done += 1
-            usage = response["usage"]
-            truncated = any(s["finish_reason"] == "length" for t in response["turns"] for s in t["steps"])
-            note = f"ERROR {response['error'][:120]}" if response["error"] else (
-                response["aborted"] or ("TRUNCATED at the token limit" if truncated else ""))
-            print(f"[{done}/{len(todo)}] {problem.set}/{problem.id}: {response['duration_s']:.0f}s, "
-                  f"{usage['output_tokens']} output tokens ({usage['reasoning_tokens']} reasoning) {note}".rstrip())
+        while active:
+            kind, subject, payload = events.get()
+            if kind == "exit":
+                active -= 1
+            elif kind == "endpoint-failed":
+                failed = payload
+                print(f"warning: lost connection to {subject}: {payload}", file=sys.stderr)
+            elif kind == "fatal":
+                failed = payload
+                stop.set()
+            else:
+                problem, response = subject, payload
+                done += 1
+                usage = response["usage"]
+                truncated = any(s["finish_reason"] == "length" for t in response["turns"] for s in t["steps"])
+                note = f"ERROR {response['error'][:120]}" if response["error"] else (
+                    response["aborted"] or ("TRUNCATED at the token limit" if truncated else ""))
+                where = f" @{response['endpoint'].split('//')[-1]}" if len(endpoints) > 1 else ""
+                print(f"[{done}/{len(todo)}] {problem.set}/{problem.id}{where}: {response['duration_s']:.0f}s, "
+                      f"{usage['output_tokens']} output tokens ({usage['reasoning_tokens']} reasoning) {note}".rstrip())
     except KeyboardInterrupt:
         print("\nInterrupted; recorded responses are kept, rerun the same command to resume.", file=sys.stderr)
-        pool.shutdown(wait=False, cancel_futures=True)
+        stop.set()
         finalize(False)
         return 130
-    pool.shutdown(wait=False, cancel_futures=True)
 
-    if failed:
+    # A lost endpoint only matters if its work could not be finished by the others.
+    if failed and (pending.qsize() or not isinstance(failed, ConnectionFailed)):
         finalize(False)
         reason = "lost connection to the server: " if isinstance(failed, ConnectionFailed) else ""
         print(f"error: {reason}{failed}\nRerun the command to resume.", file=sys.stderr)

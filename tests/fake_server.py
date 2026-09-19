@@ -27,10 +27,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/props" and self.server.llamacpp:
-            self._send(200, {"model_path": MODEL_PATH, "model_ftype": "Q8_0", "build_info": "b11023-4ff829ec2",
+            self._send(200, {"model_path": self.server.model_path, "model_ftype": "Q8_0",
+                             "build_info": "b11023-4ff829ec2",
                              "default_generation_settings": {"n_ctx": 4096, "params": {"temperature": 0.7}}})
         elif self.path == "/v1/models":
-            model_id = MODEL_PATH if self.server.llamacpp else "served-model-name"
+            model_id = self.server.model_path if self.server.llamacpp else "served-model-name"
             self._send(200, {"data": [{"id": model_id, "meta": {"n_params": 27000000000}}]})
         else:
             self._send(404, {"error": "not found"})
@@ -38,6 +39,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append((self.path, body, dict(self.headers)))
+        if getattr(self.server, "refuse_chat", False) and self.path.startswith("/v1/"):
+            self.connection.close()  # the client sees a dropped connection
+            return
         if self.path == "/tokenize" and self.server.llamacpp:
             self._send(200, {"tokens": body["content"].split()})
         elif self.path == "/v1/chat/completions":
@@ -53,7 +57,8 @@ class Handler(BaseHTTPRequestHandler):
                 finish = "tool_calls"
             else:
                 message["content"] = f"answer {sum(m['role'] == 'user' for m in body['messages'])}"
-            self._send(200, {"model": MODEL_PATH, "choices": [{"message": message, "finish_reason": finish}],
+            self._send(200, {"model": self.server.model_path,
+                             "choices": [{"message": message, "finish_reason": finish}],
                              "usage": {"prompt_tokens": 10, "completion_tokens": 7}})
         elif self.path == "/v1/messages":
             has_result = any(isinstance(m["content"], list) and any(b.get("type") == "tool_result"
@@ -67,16 +72,17 @@ class Handler(BaseHTTPRequestHandler):
                 stop = "tool_use"
             else:
                 blocks.append({"type": "text", "text": f"answer {len(body['messages']) // 2 + 1}"})
-            self._send(200, {"model": MODEL_PATH, "content": blocks, "stop_reason": stop,
+            self._send(200, {"model": self.server.model_path, "content": blocks, "stop_reason": stop,
                              "usage": {"input_tokens": 4, "cache_read_input_tokens": 6, "output_tokens": 7}})
         else:
             self._send(404, {"error": "not found"})
 
 
 class FakeServer:
-    def __init__(self, llamacpp: bool = True):
+    def __init__(self, llamacpp: bool = True, model_path: str = MODEL_PATH):
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.httpd.llamacpp = llamacpp
+        self.httpd.model_path = model_path
         self.httpd.requests = []
         self.httpd.fail_with = None
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
