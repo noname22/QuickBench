@@ -164,14 +164,14 @@ class EndToEndTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        (self.root / "problems/public").mkdir(parents=True)
-        (self.root / "problems/public/int-plain.toml").write_text(PLAIN)
-        (self.root / "problems/public/tool-lookup.toml").write_text(TOOL)
+        (self.root / "public/problems").mkdir(parents=True)
+        (self.root / "public/problems/int-plain.toml").write_text(PLAIN)
+        (self.root / "public/problems/tool-lookup.toml").write_text(TOOL)
         self.addCleanup(self.tmp.cleanup)
 
     def cli(self, *args, stdin=None):
         out, err = io.StringIO(), io.StringIO()
-        argv = ["--problems-dir", str(self.root / "problems"), "--results-dir", str(self.root / "results"), *args]
+        argv = ["--root", str(self.root), *args]
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             if stdin is not None:
                 import sys
@@ -197,7 +197,7 @@ class EndToEndTest(unittest.TestCase):
                 code, out = self.cli("run", "--api", api, "--base-url", server.url + "/v1", "--model", "m",
                                      "--quant-supplier", "unsloth", "--force")
                 self.assertEqual(code, 0, out)
-                result = self.root / "results/Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
+                result = self.root / "public/results/Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
                 run = json.loads((result / "run.json").read_text())
                 self.assertEqual(run["model"]["base_model"], "Qwen 3.8 27B")
                 self.assertEqual(run["model"]["quantization"], "Q8_0")
@@ -209,7 +209,7 @@ class EndToEndTest(unittest.TestCase):
                 self.assertEqual(run["totals"]["reasoning_tokens"], 20)
                 self.assertFalse(run["totals"]["reasoning_tokens_estimated"])
 
-                tool = json.loads((result / "responses/public/tool-lookup.json").read_text())
+                tool = json.loads((result / "responses/tool-lookup.json").read_text())
                 steps = tool["turns"][0]["steps"]
                 self.assertEqual(steps[0]["tool_calls"][0]["result"], '{"status": "shipped"}')
                 self.assertTrue(steps[1]["text"].startswith("answer"))
@@ -248,7 +248,7 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(self.cli(*base)[0], 0)
             self.assertTrue(all(body["max_tokens"] == 512 for path, body, _ in server.requests
                                 if path == "/v1/chat/completions"))
-            self.assertTrue((self.root / "results/Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0-kq8_0-vq8_0").is_dir())
+            self.assertTrue((self.root / "public/results/Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0-kq8_0-vq8_0").is_dir())
             n = len(server.requests)
             code, out = self.cli(*base)
             self.assertIn("0 to run, 2 already recorded", out)
@@ -257,29 +257,38 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("different settings", out)
 
-    def test_set_keeps_its_own_results(self):
-        # A set directory with a results/ folder (e.g. a private repository) stores its responses and grades itself.
-        private = self.root / "problems/private"
-        (private / "results").mkdir(parents=True)
+    def test_every_set_keeps_its_own_results(self):
+        private = self.root / "private/problems"
+        private.mkdir(parents=True)
         (private / "int-secret.toml").write_text(PLAIN.replace('"int-plain"', '"int-secret"'))
         name = "Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
         with FakeServer() as server:
             code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m")
             self.assertEqual(code, 0, out)
-        store = private / "results" / name
-        self.assertTrue((store / "responses/int-secret.json").exists())
-        self.assertTrue((store / "run.json").exists())
-        self.assertFalse((self.root / "results" / name / "responses/private").exists())
-        self.assertTrue((self.root / "results" / name / "responses/public/int-plain.json").exists())
-        run = json.loads((self.root / "results" / name / "run.json").read_text())
-        self.assertEqual(run["totals"]["by_set"]["private"]["problems"], 1)
+        public_part, private_part = self.root / "public/results" / name, self.root / "private/results" / name
+        self.assertTrue((private_part / "responses/int-secret.json").exists())
+        self.assertTrue((public_part / "responses/int-plain.json").exists())
+        self.assertFalse((public_part / "responses/int-secret.json").exists())
+        # Both parts describe the whole run.
+        for part in (public_part, private_part):
+            run = json.loads((part / "run.json").read_text())
+            self.assertEqual(run["totals"]["by_set"]["private"]["problems"], 1)
+            self.assertEqual(run["totals"]["problems"], 3)
 
         verdict = json.dumps({"criteria": {"right": {"points": 2, "rationale": "right"}}})
         code, out = self.cli("grade", name, "int-secret", "--grader", "t", stdin=verdict)
         self.assertEqual(code, 0, out)
-        self.assertTrue((store / "grades/t/int-secret.json").exists())
+        self.assertTrue((private_part / "grades/t/int-secret.json").exists())
         code, out = self.cli("status")
         self.assertIn("1 graded, 0 error, 2 ungraded", out)
+        self.cli("report")
+        self.assertTrue((public_part / "summary.json").exists() and (private_part / "summary.json").exists())
+
+        # A public-only run leaves the private part alone.
+        with FakeServer() as server:
+            self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m", "--sets", "public",
+                     "--cache-type-k", "q4_0")
+        self.assertFalse((self.root / "private/results" / (name + "-kq4_0-vf16")).exists())
 
     def test_rubric_change_invalidates_grades_but_not_responses(self):
         with FakeServer() as server:
@@ -289,7 +298,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(self.cli("grade", name, "int-plain", "--grader", "t", stdin=verdict)[0], 0)
         self.assertIn("1 graded, 0 error, 1 ungraded, 0 stale", self.cli("status")[1])
 
-        path = self.root / "problems/public/int-plain.toml"
+        path = self.root / "public/problems/int-plain.toml"
         path.write_text(path.read_text().replace("Says answer.", "Says answer, clearly."))
         self.assertIn("0 graded, 0 error, 2 ungraded, 0 stale", self.cli("status")[1])
 
@@ -309,7 +318,7 @@ class EndToEndTest(unittest.TestCase):
         grade("strong/model", "int-plain", "right", 2)
         grade("strong/model", "tool-lookup", "call", 1)
         grade("weak", "int-plain", "right", 1)
-        self.assertTrue((self.root / "results" / name / "grades/public/strong_model/int-plain.json").exists())
+        self.assertTrue((self.root / "public/results" / name / "grades/strong_model/int-plain.json").exists())
 
         code, out = self.cli("status")
         self.assertIn("[grader strong_model]: 2 graded, 0 error, 0 ungraded", out)
@@ -321,7 +330,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn("| strong_model |", out)
         self.assertIn("100.0", out)
         self.assertIn("| weak |", out)
-        summary = json.loads((self.root / "results" / name / "summary.json").read_text())
+        summary = json.loads((self.root / "public/results" / name / "summary.json").read_text())
         self.assertEqual(set(summary["graders"]), {"strong_model", "weak"})
 
         code, out = self.cli("compare-graders", name, "--baseline", "strong/model")
@@ -337,7 +346,7 @@ class EndToEndTest(unittest.TestCase):
                                  "--filter", "int-plain")
             self.assertEqual(code, 0, out)
             # No /props and the probe request failed: fall back to /v1/models, then to the requested name.
-            result = self.root / "results/served-model-name"
+            result = self.root / "public/results/served-model-name"
             run = json.loads((result / "run.json").read_text())
             self.assertEqual(run["engine"], "unknown")
             self.assertEqual(run["totals"]["errors"], 1)
@@ -350,10 +359,10 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn("cannot reach", out)
 
     def test_validation_errors(self):
-        (self.root / "problems/public/int-bad.toml").write_text(PLAIN.replace('"int-plain"', '"int-bad"')
+        (self.root / "public/problems/int-bad.toml").write_text(PLAIN.replace('"int-plain"', '"int-bad"')
                                                                 .replace('criterion = "right"', 'criterion = "x"'))
         with self.assertRaises(ProblemError):
-            load_problems(self.root / "problems")
+            load_problems(self.root)
 
 
 if __name__ == "__main__":

@@ -10,16 +10,15 @@ from pathlib import Path
 from . import __version__
 from .clients import API_STYLES
 from .problems import SETS, TAGS, ProblemError, load_problems
-from .report import (GradeError, compare_graders, find_result_dirs, problem_states, record_grade, render_table,
-                     summarize)
-from .runner import grader_dir_name, list_graders, read_json, response_path, run, write_json
+from .report import GradeError, compare_graders, problem_states, record_grade, render_table, summarize
+from .runner import Result, find_results, grader_dir_name, list_graders, read_json, response_path, run, write_json
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="quickbench", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
-    parser.add_argument("--problems-dir", default="problems", help="directory holding the problem sets")
-    parser.add_argument("--results-dir", default="results", help="directory holding the results")
+    parser.add_argument("--root", default=".",
+                        help="directory holding the sets: <root>/<set>/problems and <root>/<set>/results")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("run", help="present the problems to a model and record its responses")
@@ -92,32 +91,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _result_dir(args, value: str) -> Path:
-    """Accept both 'results/<name>' and a bare '<name>'."""
-    path = Path(value)
-    if not (path / "run.json").exists():
-        path = Path(args.results_dir) / value
-    if not (path / "run.json").exists():
-        raise SystemExit(f"error: {value}: not a result directory (no run.json)")
-    return path
+def _result(args, value: str) -> Result:
+    """Accept a result name or any path ending in it (e.g. public/results/<name>)."""
+    result = Result(Path(args.root), Path(value).name)
+    if not result.existing_dirs():
+        raise SystemExit(f"error: {value}: no such result (no run.json in {result})")
+    return result
 
 
 def _problem(args, problem_id: str):
-    for problem in load_problems(Path(args.problems_dir)):
+    for problem in load_problems(Path(args.root)):
         if problem.id == problem_id:
             return problem
     raise SystemExit(f"error: unknown problem {problem_id!r}")
 
 
-def _response(result_dir: Path, problem) -> dict:
-    path = response_path(result_dir, problem)
+def _response(result: Result, problem) -> dict:
+    path = response_path(result, problem)
     if not path.exists():
-        raise SystemExit(f"error: no response for {problem.id} in {result_dir}")
+        raise SystemExit(f"error: no response for {problem.id} in {result}")
     return read_json(path)
 
 
 def cmd_validate(args) -> int:
-    problems = load_problems(Path(args.problems_dir))
+    problems = load_problems(Path(args.root))
     print(f"{len(problems)} problems are valid.")
     for set_name in SETS:
         members = [p for p in problems if p.set == set_name]
@@ -147,19 +144,19 @@ def cmd_validate(args) -> int:
 
 
 def cmd_status(args) -> int:
-    problems = load_problems(Path(args.problems_dir))
-    dirs = [_result_dir(args, args.result)] if args.result else find_result_dirs(Path(args.results_dir))
+    problems = load_problems(Path(args.root))
+    dirs = [_result(args, args.result)] if args.result else find_results(Path(args.root))
     if not dirs:
         print("No results found.")
     for result_dir in dirs:
         # Grades are kept per grader; a result nobody has graded yet is all "ungraded".
-        graders = [grader_dir_name(args.grader)] if args.grader else list_graders(result_dir, problems) or [None]
+        graders = [grader_dir_name(args.grader)] if args.grader else list_graders(result_dir) or [None]
         for grader in graders:
             states = problem_states(result_dir, problems, grader)
             counts = {name: sum(s["state"] == name for s in states)
                       for name in ("graded", "error", "ungraded", "stale", "missing")}
             label = f" [grader {grader}]" if grader else ""
-            print(f"{result_dir}{label}: " + ", ".join(f"{n} {name}" for name, n in counts.items()))
+            print(f"{result_dir.name}{label}: " + ", ".join(f"{n} {name}" for name, n in counts.items()))
             for name in ("ungraded", "stale", "missing"):
                 ids = [f"{s['problem'].set}/{s['problem'].id}" for s in states if s["state"] == name]
                 if ids and (name == "ungraded" or args.result):
@@ -170,7 +167,7 @@ def cmd_status(args) -> int:
 def cmd_packet(args) -> int:
     from .packet import render_packet
 
-    result_dir, problem = _result_dir(args, args.result), _problem(args, args.problem_id)
+    result_dir, problem = _result(args, args.result), _problem(args, args.problem_id)
     print(render_packet(problem, _response(result_dir, problem), args.with_reasoning))
     return 0
 
@@ -178,7 +175,7 @@ def cmd_packet(args) -> int:
 def cmd_runtests(args) -> int:
     from .sandbox import run_tests
 
-    result_dir, problem = _result_dir(args, args.result), _problem(args, args.problem_id)
+    result_dir, problem = _result(args, args.result), _problem(args, args.problem_id)
     outcome = run_tests(problem, _response(result_dir, problem), args.timeout)
     print(f"status: {outcome['status']}" + (f" (isolation: {outcome['isolation']})" if "isolation" in outcome else ""))
     if args.show_code and "code" in outcome:
@@ -188,7 +185,7 @@ def cmd_runtests(args) -> int:
 
 
 def cmd_grade(args) -> int:
-    result_dir, problem = _result_dir(args, args.result), _problem(args, args.problem_id)
+    result_dir, problem = _result(args, args.result), _problem(args, args.problem_id)
     try:
         verdict = json.load(sys.stdin)
         grade = record_grade(result_dir, problem, verdict.get("criteria"), args.grader, verdict.get("notes"))
@@ -204,15 +201,17 @@ def cmd_grade(args) -> int:
 
 
 def cmd_report(args) -> int:
-    problems = load_problems(Path(args.problems_dir))
-    dirs = [_result_dir(args, r) for r in args.results] or find_result_dirs(Path(args.results_dir))
+    problems = load_problems(Path(args.root))
+    dirs = [_result(args, r) for r in args.results] or find_results(Path(args.root))
     summaries = []
     for result_dir in dirs:
         # "-" stands for "nobody yet": failed requests score 0 even before anyone has graded.
-        graders = [grader_dir_name(args.grader)] if args.grader else list_graders(result_dir, problems) or ["-"]
+        graders = [grader_dir_name(args.grader)] if args.grader else list_graders(result_dir) or ["-"]
         per_grader = {grader: summarize(result_dir, problems, grader) for grader in graders}
         if per_grader and not args.grader:
-            write_json(result_dir / "summary.json", {"result": result_dir.name, "graders": per_grader})
+            # Scores are not secret: every set's part of the result gets the full summary.
+            for directory in result_dir.existing_dirs():
+                write_json(directory / "summary.json", {"result": result_dir.name, "graders": per_grader})
         summaries.extend(per_grader.values())
     if not summaries:
         print("No graded results found.")
@@ -226,16 +225,17 @@ def cmd_report(args) -> int:
 
 
 def cmd_compare_graders(args) -> int:
-    problems = load_problems(Path(args.problems_dir))
-    result_dir = _result_dir(args, args.result)
-    graders = list_graders(result_dir, problems)
+    problems = load_problems(Path(args.root))
+    result_dir = _result(args, args.result)
+    graders = list_graders(result_dir)
     if args.baseline:
         baseline = grader_dir_name(args.baseline)
         if baseline not in graders:
-            raise SystemExit(f"error: no grades by {args.baseline!r} in {result_dir} (graders: {', '.join(graders)})")
+            raise SystemExit(f"error: no grades by {args.baseline!r} in {result_dir.name} "
+                             f"(graders: {', '.join(graders)})")
         graders = [baseline] + [g for g in graders if g != baseline]
     if len(graders) < 2:
-        raise SystemExit(f"error: {result_dir} has grades from {len(graders)} grader(s); two are needed to compare")
+        raise SystemExit(f"error: {result_dir.name} has grades from {len(graders)} grader(s); two are needed")
     print(compare_graders(result_dir, problems, graders))
     return 0
 
