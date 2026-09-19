@@ -281,6 +281,21 @@ class EndToEndTest(unittest.TestCase):
         code, out = self.cli("status")
         self.assertIn("1 graded, 0 error, 2 ungraded", out)
 
+    def test_rubric_change_invalidates_grades_but_not_responses(self):
+        with FakeServer() as server:
+            self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m")
+        name = "Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
+        verdict = json.dumps({"criteria": {"right": {"points": 2, "rationale": "right"}}})
+        self.assertEqual(self.cli("grade", name, "int-plain", "--grader", "t", stdin=verdict)[0], 0)
+        self.assertIn("1 graded, 0 error, 1 ungraded, 0 stale", self.cli("status")[1])
+
+        path = self.root / "problems/public/int-plain.toml"
+        path.write_text(path.read_text().replace("Says answer.", "Says answer, clearly."))
+        self.assertIn("0 graded, 0 error, 2 ungraded, 0 stale", self.cli("status")[1])
+
+        path.write_text(path.read_text().replace('user = "second"', 'user = "second, changed"'))
+        self.assertIn("0 graded, 0 error, 1 ungraded, 1 stale", self.cli("status")[1])
+
     def test_generic_server_and_api_errors(self):
         with FakeServer(llamacpp=False) as server:
             server.httpd.fail_with = 500
