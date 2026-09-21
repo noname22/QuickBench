@@ -1,6 +1,6 @@
 # Plausible but too slow for many rings: compares every ring with a representative of every group so far
 # (rotation test: text of b inside text of a + a, which is fine for one pair).
-# EXPECT-FAIL: 
+# EXPECT-FAIL: test_many_small_rings_performance
 def _text(ring):
     return "," + ",".join(map(str, ring)) + ","
 
