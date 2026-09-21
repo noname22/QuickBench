@@ -10,7 +10,8 @@ from pathlib import Path
 from . import __version__
 from .clients import API_STYLES
 from .problems import SETS, TAGS, ProblemError, load_problems
-from .report import GradeError, compare_graders, problem_states, record_grade, render_table, summarize
+from .report import (GradeError, auto_awards, compare_graders, problem_states, record_grade, render_table,
+                     summarize)
 from .runner import Result, find_results, grader_dir_name, list_graders, read_json, response_path, run, write_json
 
 
@@ -82,6 +83,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--grader", required=True,
                    help="who graded, e.g. the grading model's name; grades are kept separately per grader")
     p.set_defaults(func=cmd_grade)
+
+    p = sub.add_parser("autograde", help="grade what checks and tests fully determine, without an LLM grader")
+    p.add_argument("result", nargs="?", help="result name (default: all)")
+    p.add_argument("--grader", default="auto",
+                   help="grader name to record under (default 'auto'); a grading agent passes its own name so "
+                        "that its result ends up complete under one name")
+    p.set_defaults(func=cmd_autograde)
 
     p = sub.add_parser("report", help="aggregate grades into summary.json and print a comparison")
     p.add_argument("results", nargs="*", help="result directories (default: all)")
@@ -234,6 +242,25 @@ def cmd_grade(args) -> int:
         return 2
     points = sum(c["points_awarded"] for c in grade["criteria"])
     print(f"Recorded {problem.set}/{problem.id}: {points:g}/{problem.max_points} points")
+    return 0
+
+
+def cmd_autograde(args) -> int:
+    problems = load_problems(Path(args.root))
+    results = [_result(args, args.result)] if args.result else find_results(Path(args.root))
+    for result in results:
+        graded = skipped = 0
+        for state in problem_states(result, problems, grader_dir_name(args.grader)):
+            if state["state"] != "ungraded":
+                continue
+            awards = auto_awards(state["problem"], state["response"])
+            if awards is None:
+                skipped += 1
+                continue
+            record_grade(result, state["problem"], awards, args.grader, "graded by the harness from checks and tests")
+            graded += 1
+        print(f"{result.name} [grader {args.grader}]: {graded} graded automatically, "
+              f"{skipped} left for a grader (criteria without `auto`)")
     return 0
 
 

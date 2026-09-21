@@ -50,10 +50,12 @@ def args_match(expected: dict, actual) -> bool:
 class MockTools:
     """Per-conversation tool state (`once` responses are consumed, `after` responses wait for another tool)."""
 
-    def __init__(self, tools: list[dict]):
+    def __init__(self, tools: list[dict], simulator: str | None = None):
         self.tools = {t["name"]: t for t in tools}
         self.consumed: set[tuple[str, int]] = set()
         self.called: set[str] = set()
+        self.simulator = simulator  # Python source defining initial_state() and call(state, name, args)
+        self.history: list[dict] = []
 
     def call(self, name: str, arguments) -> str:
         tool = self.tools.get(name)
@@ -61,6 +63,12 @@ class MockTools:
             return json.dumps({"error": f"unknown tool '{name}'"})
         if not isinstance(arguments, dict):
             return json.dumps({"error": "arguments must be a JSON object"})
+        if self.simulator is not None:
+            from .sandbox import simulate  # imported late: sandbox imports checks, which imports this module
+
+            self.history.append({"name": name, "arguments": arguments})
+            result = simulate(self.simulator, self.history)["results"][-1]
+            return result if isinstance(result, str) else json.dumps(result)
         previously_called = set(self.called)
         self.called.add(name)
         for i, resp in enumerate(tool.get("responses", [])):
@@ -73,3 +81,9 @@ class MockTools:
                 self.consumed.add((name, i))
             return resp["result"]
         return tool.get("default_result", json.dumps({"error": "no result for these arguments"}))
+
+
+def simulator_calls(tool_names, recorded_calls: list[dict]) -> list[dict]:
+    """The recorded calls that reached the simulator (same filter as MockTools.call), for replaying."""
+    return [{"name": c["name"], "arguments": c["arguments"]} for c in recorded_calls
+            if c["name"] in tool_names and isinstance(c.get("arguments"), dict)]
