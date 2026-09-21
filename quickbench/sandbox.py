@@ -180,12 +180,28 @@ def simulate(code: str, calls: list[dict]) -> dict:
 
 
 CHECKS_DRIVER = '''
-import json
+import json, re, unicodedata
+
+
+def norm(s):
+    """Casefold, strip accents and punctuation, collapse whitespace: 'Gerlachovský štít!' -> 'gerlachovsky stit'."""
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch)).casefold()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", s).split())
+
+
+def numbered_answer(text, n):
+    """The answer given for question n in a reply of numbered lines ('3. ...', '3) ...', '**3.** ...'), or ''."""
+    m = re.search(rf"^[ \\t>*_#-]*\\(?{n}[.):\\]]+[*_ \\t]*(.*?)\\s*$", text, re.MULTILINE)
+    return m.group(1).strip() if m else ""
+
+
+HELPERS = {"norm": norm, "numbered_answer": numbered_answer, "re": re, "json": json}
 ctx = json.load(open("ctx.json"))
 outcomes = []
 for i, code in enumerate(json.load(open("checks.json"))):
     try:
-        ns = {}
+        ns = dict(HELPERS)
         exec(compile(code, f"check_{i}", "exec"), ns)
         value = ns["check"](dict(ctx, **ctx["per_check"][i]))
         passed, detail = value if isinstance(value, tuple) else (value, "")
