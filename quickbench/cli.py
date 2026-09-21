@@ -10,8 +10,8 @@ from pathlib import Path
 from . import __version__
 from .clients import API_STYLES
 from .problems import SETS, TAGS, ProblemError, load_problems
-from .report import (GradeError, auto_awards, compare_graders, problem_states, record_grade, render_table,
-                     summarize)
+from .report import (GradeError, auto_awards, compare_graders, item_matrix, problem_states, record_grade,
+                     render_table, summarize)
 from .runner import Result, find_results, grader_dir_name, list_graders, read_json, response_path, run, write_json
 
 
@@ -95,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("results", nargs="*", help="result directories (default: all)")
     p.add_argument("--grader", help="only report this grader's scores (default: one row per grader)")
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("items", help="per-problem scores across results, to see which problems discriminate")
+    p.add_argument("results", nargs="*", help="result names (default: all)")
+    p.add_argument("--grader", default="auto", help="whose grades to use (default: auto)")
+    p.set_defaults(func=cmd_items)
 
     p = sub.add_parser("compare-graders", help="show how far several graders agree on the same responses")
     p.add_argument("result")
@@ -285,6 +290,16 @@ def cmd_report(args) -> int:
         scopes = scopes[1:]
     for scope in scopes:
         print(f"## Scores (%): {scope}\n\n{render_table(summaries, scope)}\n")
+    return 0
+
+
+def cmd_items(args) -> int:
+    problems = load_problems(Path(args.root))
+    results = [_result(args, r) for r in args.results] or find_results(Path(args.root))
+    if not results:
+        print("No results found.")
+        return 0
+    print(item_matrix(results, problems, grader_dir_name(args.grader)))
     return 0
 
 
