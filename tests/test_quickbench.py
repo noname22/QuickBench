@@ -289,9 +289,9 @@ class EndToEndTest(unittest.TestCase):
                 # Sampling parameters are not sent unless asked for.
                 chat = [body for path, body, _ in server.requests if path.startswith("/v1/")]
                 self.assertTrue(all("temperature" not in body for body in chat))
-                # Nor is an output token limit.
-                self.assertTrue(all("max_tokens" not in body for body in chat))
-                self.assertIsNone(run["generation"]["max_tokens"])
+                # The output token limit defaults to a generous 65536.
+                self.assertTrue(all(body["max_tokens"] == 65536 for body in chat))
+                self.assertEqual(run["generation"]["max_tokens"], 65536)
 
         code, out = self.cli("status")
         self.assertIn("2 ungraded", out)
@@ -533,6 +533,14 @@ class EndToEndTest(unittest.TestCase):
         lazy = auto_awards(problem, answer("def add(a, b):\n    raise TypeError"))["right"]
         self.assertEqual(lazy["points"], 0)
         self.assertIn("gate", lazy["rationale"])
+
+    def test_no_token_limit_on_request(self):
+        with FakeServer() as server:
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
+                                 "--max-tokens", "0", "--filter", "int-plain")
+            self.assertEqual(code, 0, out)
+            chat = [body for path, body, _ in server.requests if path == "/v1/chat/completions"]
+        self.assertTrue(chat and all("max_tokens" not in body for body in chat))
 
     def test_generic_server_and_api_errors(self):
         with FakeServer(llamacpp=False) as server:

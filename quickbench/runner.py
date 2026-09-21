@@ -216,6 +216,8 @@ def run(args) -> int:
     sampling = {k: v for k, v in (("temperature", args.temperature), ("top_p", args.top_p), ("seed", args.seed))
                 if v is not None}
 
+    if not args.max_tokens:  # 0: no limit
+        args.max_tokens = None
     all_problems = load_problems(Path(args.root), args.sets.split(",") if args.sets else None)
     problems = select_problems(all_problems, args.filter)
     if not problems:
