@@ -67,6 +67,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/v1/chat/completions":
             if self.server.fail_with:
                 return self._send(self.server.fail_with, {"error": "boom"})
+            if getattr(self.server, "garble_after_tool", False) and any(m["role"] == "tool" for m in body["messages"]):
+                return self._send(500, {"error": {"code": 500, "message": "The model produced output that does "
+                                                  "not match the expected peg-native format"}})
             has_result = any(m["role"] == "tool" for m in body["messages"])
             message = {"role": "assistant", "content": "", "reasoning_content": "let me think about it"}
             finish = "stop"

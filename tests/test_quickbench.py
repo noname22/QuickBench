@@ -542,6 +542,24 @@ class EndToEndTest(unittest.TestCase):
             chat = [body for path, body, _ in server.requests if path == "/v1/chat/completions"]
         self.assertTrue(chat and all("max_tokens" not in body for body in chat))
 
+    def test_unparseable_model_output_is_the_models_failure(self):
+        (self.root / "public/problems/tool-stateful.toml").write_text(SIMULATED)
+        name = "Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
+        with FakeServer() as server:
+            server.httpd.garble_after_tool = True  # the first call succeeds, then the "model" emits garbage
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
+                                 "--filter", "tool-stateful")
+            self.assertEqual(code, 0, out)
+        recorded = json.loads((self.root / "public/results" / name / "responses/tool-stateful.json").read_text())
+        self.assertIsNone(recorded["error"])
+        self.assertIn("could not parse the model's output", recorded["aborted"])
+        self.assertEqual(len(recorded["turns"][0]["steps"]), 1)  # the successful tool call is kept
+        self.cli("autograde", name)
+        grade = json.loads((self.root / "public/results" / name / "grades/auto/tool-stateful.json").read_text())
+        awarded = {c["id"]: c["points_awarded"] for c in grade["criteria"]}
+        self.assertEqual(awarded["end-state"], 3)  # the order was cancelled before the model broke down
+        self.assertEqual(awarded["reply"], 0)      # but there never was a reply
+
     def test_generic_server_and_api_errors(self):
         with FakeServer(llamacpp=False) as server:
             server.httpd.fail_with = 500
