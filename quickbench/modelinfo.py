@@ -7,6 +7,7 @@ back to generic endpoints and finally to what the user passed on the command lin
 from __future__ import annotations
 
 import re
+import urllib.parse
 
 from .clients import ApiError, ConnectionFailed, http_json
 
@@ -115,15 +116,31 @@ def result_dir_name(model_name: str, cache_k: str, cache_v: str) -> str:
     return name
 
 
-def _get(url: str, headers: dict):
+def _get(url: str, headers: dict, timeout: float = 15):
     try:
-        return http_json(url, headers=headers, timeout=15)
+        return http_json(url, headers=headers, timeout=timeout)
     except ApiError:
         return None
 
 
-def probe(root: str, api: str, api_key: str | None) -> dict:
-    """Ask the server about itself. Raises ConnectionFailed when it cannot be reached at all."""
+def kv_cache_from_args(args) -> tuple[str | None, str | None]:
+    """(--cache-type-k, --cache-type-v) from a llama-server command line, None where not given."""
+    found: dict[str, str] = {}
+    args = [str(a) for a in args or []]
+    for i, arg in enumerate(args):
+        for flag, key in (("--cache-type-k", "k"), ("-ctk", "k"), ("--cache-type-v", "v"), ("-ctv", "v")):
+            if arg == flag and i + 1 < len(args):
+                found[key] = args[i + 1]
+            elif arg.startswith(flag + "="):
+                found[key] = arg.split("=", 1)[1]
+    return found.get("k"), found.get("v")
+
+
+def probe(root: str, api: str, api_key: str | None, model: str | None = None) -> dict:
+    """Ask the server about itself. Raises ConnectionFailed when it cannot be reached at all.
+
+    A llama.cpp router serves several models; everything is then asked about `model`.
+    """
     headers = {}
     if api_key:
         headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"} if api == "anthropic" \
@@ -132,9 +149,18 @@ def probe(root: str, api: str, api_key: str | None) -> dict:
         headers.setdefault("anthropic-version", "2023-06-01")
 
     info: dict = {"reported_model": None, "quantization": None, "engine": None, "n_params": None, "n_ctx": None,
-                  "server_sampling_defaults": None, "tokenize": False}
+                  "server_sampling_defaults": None, "tokenize": False, "router": False, "kv_cache": (None, None)}
 
     props = _get(root + "/props", headers)
+    if isinstance(props, dict) and props.get("role") == "router":
+        # The router answers for itself; ask again for the model under test (this also loads it).
+        info["router"] = True
+        build = props.get("build_info")
+        # Loading a large model from disk can take minutes.
+        props = _get(root + "/props?model=" + urllib.parse.quote(model or "", safe=""), headers, timeout=900)
+        if not isinstance(props, dict) or not props.get("model_path"):
+            raise ApiError(f"the router at {root} does not serve a model called {model!r}")
+        props.setdefault("build_info", build)
     if isinstance(props, dict) and ("build_info" in props or "model_path" in props):
         path = props.get("model_path") or props.get("model_alias")
         if path:
@@ -151,7 +177,11 @@ def probe(root: str, api: str, api_key: str | None) -> dict:
 
     models = _get(root + "/v1/models", headers)
     entries = models.get("data") if isinstance(models, dict) else None
-    if isinstance(entries, list) and entries:
+    if info["router"] and isinstance(entries, list):
+        entry = next((e for e in entries if e.get("id") == model), {})
+        info["n_params"] = (entry.get("meta") or {}).get("n_params")
+        info["kv_cache"] = kv_cache_from_args((entry.get("status") or {}).get("args"))
+    elif isinstance(entries, list) and entries:
         first = entries[0]
         # Only trust the list for the name when it is unambiguous (single-model servers).
         if not info["reported_model"] and len(entries) == 1 and first.get("id"):
@@ -183,10 +213,11 @@ def format_llamacpp_build(build_info: str | None) -> str:
 class TokenCounter:
     """Counts reasoning tokens. APIs rarely report them, so use llama.cpp's /tokenize when available."""
 
-    def __init__(self, root: str, headers: dict, enabled: bool):
+    def __init__(self, root: str, headers: dict, enabled: bool, model: str | None = None):
         self.url = root + "/tokenize"
         self.headers = headers
         self.enabled = enabled
+        self.extra = {"model": model} if model else {}  # a router picks the model from the request body
 
     def count(self, text: str) -> tuple[int, bool]:
         """Returns (tokens, estimated)."""
@@ -194,7 +225,8 @@ class TokenCounter:
             return 0, False
         if self.enabled:
             try:
-                tokens = http_json(self.url, {"content": text}, self.headers, timeout=60, retries=1).get("tokens")
+                body = {"content": text, **self.extra}
+                tokens = http_json(self.url, body, self.headers, timeout=60, retries=1).get("tokens")
                 if isinstance(tokens, list):
                     return len(tokens), False
             except (ApiError, ConnectionFailed):

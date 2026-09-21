@@ -28,8 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "to spread the problems over several servers that serve the same model")
     p.add_argument("--model", required=True, help="model name to request from the endpoint")
     p.add_argument("--api-key", help="API key (or set QUICKBENCH_API_KEY)")
-    p.add_argument("--cache-type-k", default="f16", help="KV cache K quantization the server runs with")
-    p.add_argument("--cache-type-v", default="f16", help="KV cache V quantization the server runs with")
+    p.add_argument("--cache-type-k", help="KV cache K quantization the server runs with (default: what a "
+                                          "llama.cpp router reports for the model, else f16)")
+    p.add_argument("--cache-type-v", help="KV cache V quantization the server runs with (same default)")
     p.add_argument("--quant-supplier", help="who produced the quantized weights, e.g. unsloth")
     p.add_argument("--base-model", help="override the detected base model, e.g. 'Qwen 3.8 27B'")
     p.add_argument("--fine-tune", help="override the detected fine-tune name")

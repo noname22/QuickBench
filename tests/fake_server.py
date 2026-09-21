@@ -26,6 +26,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        router = getattr(self.server, "router_models", None)
+        if router is not None:
+            return self._router_get(router)
         if self.path == "/props" and self.server.llamacpp:
             self._send(200, {"model_path": self.server.model_path, "model_ftype": "Q8_0",
                              "build_info": "b11023-4ff829ec2",
@@ -36,13 +39,30 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, {"error": "not found"})
 
+    def _router_get(self, models: dict) -> None:
+        """llama.cpp router mode: /props describes the router, /props?model=X one of its models."""
+        if self.path == "/props":
+            self._send(200, {"role": "router", "model_path": "none", "build_info": "b11023-4ff829ec2"})
+        elif self.path.startswith("/props?model="):
+            name = self.path.split("=", 1)[1]
+            if name not in models:
+                return self._send(404, {"error": "model not found"})
+            self._send(200, {"model_path": models[name]["path"], "model_ftype": "F16", "model_alias": name,
+                             "default_generation_settings": {"n_ctx": 4096, "params": {}}})
+        elif self.path == "/v1/models":
+            self._send(200, {"data": [{"id": name, "meta": {"n_params": 123},
+                                       "status": {"value": "loaded", "args": m["args"]}}
+                                      for name, m in models.items()]})
+        else:
+            self._send(404, {"error": "not found"})
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append((self.path, body, dict(self.headers)))
         if getattr(self.server, "refuse_chat", False) and self.path.startswith("/v1/"):
             self.connection.close()  # the client sees a dropped connection
             return
-        if self.path == "/tokenize" and self.server.llamacpp:
+        if self.path == "/tokenize" and (self.server.llamacpp or getattr(self.server, "router_models", None)):
             self._send(200, {"tokens": body["content"].split()})
         elif self.path == "/v1/chat/completions":
             if self.server.fail_with:

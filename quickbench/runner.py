@@ -199,7 +199,7 @@ def set_hashes(problems: list[Problem]) -> dict:
 
 
 # What must agree between endpoints for them to count as the same model under test.
-SAME_MODEL_KEYS = ("reported_model", "quantization", "engine", "n_params")
+SAME_MODEL_KEYS = ("reported_model", "quantization", "engine", "n_params", "kv_cache")
 
 
 def run(args) -> int:
@@ -226,9 +226,12 @@ def run(args) -> int:
     for url in roots:
         print(f"Probing {url} ...")
         try:
-            infos[url] = probe(url, args.api, api_key)
+            infos[url] = probe(url, args.api, api_key, args.model)
         except ConnectionFailed as e:
             print(f"error: cannot reach the server: {e}", file=sys.stderr)
+            return 2
+        except ApiError as e:
+            print(f"error: {e}", file=sys.stderr)
             return 2
     info = infos[root]
     for url in roots[1:]:
@@ -258,25 +261,39 @@ def run(args) -> int:
     reported = reported or args.model
 
     parsed = parse_model_name(reported)
+
+    # KV cache types: a router shows how each model was launched; otherwise they are the user's word.
+    detected_k, detected_v = info["kv_cache"]
+    for given, detected, flag in ((args.cache_type_k, detected_k, "--cache-type-k"),
+                                  (args.cache_type_v, detected_v, "--cache-type-v")):
+        if given and detected and given != detected:
+            print(f"error: {flag} {given} was given, but the server runs this model with {detected}",
+                  file=sys.stderr)
+            return 2
+    cache_k = args.cache_type_k or detected_k or "f16"
+    cache_v = args.cache_type_v or detected_v or "f16"
     run_info = {
         "harness_version": __version__,
         "model": {
             "name": reported,
             "base_model": args.base_model or parsed["base_model"],
             "fine_tune": args.fine_tune or parsed["fine_tune"],
-            "quantization": args.quant or info["quantization"] or parsed["quantization"],
+            # A tag in the file name beats model_ftype, which only knows the base type ("Q4_K - Medium" for
+            # UD-Q4_K_XL, "F16" for MXFP4); the reported value is kept alongside.
+            "quantization": args.quant or parsed["quantization"] or info["quantization"],
+            "model_ftype": info["quantization"],
             "quant_supplier": args.quant_supplier,
             "n_params": info["n_params"],
         },
-        "kv_cache": {"k": args.cache_type_k, "v": args.cache_type_v,
-                     "description": describe_kv_cache(args.cache_type_k, args.cache_type_v)},
+        "kv_cache": {"k": cache_k, "v": cache_v, "description": describe_kv_cache(cache_k, cache_v),
+                     "source": "router launch arguments" if any(info["kv_cache"]) else "command line / default"},
         "engine": args.engine or info["engine"] or "unknown",
         "endpoint": {"api": args.api, "base_urls": roots, "requested_model": args.model, "n_ctx": info["n_ctx"]},
         "generation": {"max_tokens": args.max_tokens, "sampling_overrides": sampling,
                        "server_sampling_defaults": info["server_sampling_defaults"], "extra_body": extra_body},
     }
 
-    result = Result(Path(args.root), result_dir_name(reported, args.cache_type_k, args.cache_type_v))
+    result = Result(Path(args.root), result_dir_name(reported, cache_k, cache_v))
     result_dirs = result.set_dirs(p.set for p in all_problems)
     started_at = now()
     previous = result.read_run()
@@ -316,7 +333,9 @@ def run(args) -> int:
     print(f"Problems: {len(todo)} to run, {len(problems) - len(todo)} already recorded")
 
     auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    endpoints = [{"root": url, "counter": TokenCounter(url, auth, infos[url]["tokenize"])} for url in roots]
+    endpoints = [{"root": url,
+                  "counter": TokenCounter(url, auth, infos[url]["tokenize"],
+                                          args.model if infos[url]["router"] else None)} for url in roots]
 
     def finalize(finished: bool) -> None:
         # Every set's part of the result says what produced it, so each can be read (and published) on its own.
