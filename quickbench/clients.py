@@ -192,6 +192,8 @@ class OpenAIConversation(Conversation):
         text = message.get("content") or ""
         if isinstance(text, list):  # content parts
             text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
+        if not text and message.get("refusal"):
+            text = message["refusal"]
         reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
         if not reasoning:
             m = THINK_RE.match(text)
@@ -235,6 +237,8 @@ class OpenAIConversation(Conversation):
                 delta = choice.get("delta") or {}
                 if delta.get("content"):
                     text.append(delta["content"])
+                if delta.get("refusal"):  # the provider refused; keep its text so the record is not just empty
+                    text.append(delta["refusal"])
                 for key in ("reasoning_content", "reasoning"):
                     if delta.get(key):
                         reasoning.append(delta[key])
