@@ -89,14 +89,45 @@ def http_json(url: str, payload: dict | None = None, headers: dict | None = None
     raise AssertionError("unreachable")
 
 
+def http_stream(url: str, payload: dict, headers: dict, timeout: float):
+    """POST and yield the JSON objects of a server-sent event stream ("data: {...}" lines).
+
+    The timeout is per read, i.e. an idle timeout: a generation may take hours as long as tokens keep coming.
+    """
+    request = urllib.request.Request(url, json.dumps(payload).encode(),
+                                     {"Content-Type": "application/json", "Accept": "text/event-stream",
+                                      **(headers or {})})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    return
+                try:
+                    yield json.loads(data)
+                except json.JSONDecodeError as e:
+                    raise ApiError(f"bad stream chunk: {data[:200]}") from e
+    except urllib.error.HTTPError as e:
+        raise ApiError(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:2000]}") from e
+    except TimeoutError as e:
+        raise ApiError(f"stream idle for {timeout:.0f}s") from e
+    except (urllib.error.URLError, ConnectionError, OSError) as e:
+        raise ConnectionFailed(f"{url}: {e}") from e
+
+
 class Conversation:
     """One conversation with the model under test. Subclasses speak a specific API style."""
 
     path = ""
 
     def __init__(self, root: str, model: str, api_key: str | None, system: str | None, tools: list[dict],
-                 max_tokens: int | None, sampling: dict, extra_body: dict, timeout: float):
+                 max_tokens: int | None, sampling: dict, extra_body: dict, timeout: float,
+                 stream: bool = False):
         self.url = root + self.path
+        self.stream = stream
         self.model = model
         self.api_key = api_key
         self.system = system
@@ -135,7 +166,9 @@ class OpenAIConversation(Conversation):
                 for t in self.tools
             ]
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        if self.max_tokens is None:  # no limit: generation ends when the model stops or the context is full
+        if self.stream:
+            data = self._stream(payload, headers)
+        elif self.max_tokens is None:  # no limit: generation ends when the model stops or the context is full
             data = self._post(payload, headers)
         else:
             try:
@@ -185,6 +218,42 @@ class OpenAIConversation(Conversation):
             model=data.get("model"),
             timings=data.get("timings") or {},
         )
+
+    def _stream(self, payload: dict, headers: dict) -> dict:
+        """Streamed request, returned in the shape of a non-streamed chat completion."""
+        body = {**payload, **self.sampling, **self.extra_body, "stream": True,
+                "stream_options": {"include_usage": True}}
+        if self.max_tokens is not None:
+            body[self.max_tokens_param] = self.max_tokens
+        text, reasoning, finish, usage, model = [], [], None, None, None
+        calls: dict[int, dict] = {}
+        for chunk in http_stream(self.url, body, headers, self.timeout):
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            model = chunk.get("model") or model
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    text.append(delta["content"])
+                for key in ("reasoning_content", "reasoning"):
+                    if delta.get(key):
+                        reasoning.append(delta[key])
+                for tc in delta.get("tool_calls") or []:
+                    slot = calls.setdefault(tc.get("index", len(calls)),
+                                            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                    slot["id"] = tc.get("id") or slot["id"]
+                    fn = tc.get("function") or {}
+                    slot["function"]["name"] += fn.get("name") or ""
+                    args = fn.get("arguments") or ""
+                    slot["function"]["arguments"] += args if isinstance(args, str) else json.dumps(args)
+                finish = choice.get("finish_reason") or finish
+        message = {"role": "assistant", "content": "".join(text) or None}
+        if reasoning:
+            message["reasoning_content"] = "".join(reasoning)
+        if calls:
+            message["tool_calls"] = [calls[i] for i in sorted(calls)]
+        return {"choices": [{"message": message, "finish_reason": finish or "stop"}], "usage": usage or {},
+                "model": model}
 
     def add_tool_results(self, results: list[tuple[ToolCall, str]]) -> None:
         for call, result in results:

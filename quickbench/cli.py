@@ -48,6 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--temperature", type=float, help="sampling override (default: server setting)")
     p.add_argument("--top-p", type=float, help="sampling override (default: server setting)")
     p.add_argument("--seed", type=int, help="sampling override (default: server setting)")
+    p.add_argument("--stream", action="store_true",
+                   help="stream responses (OpenAI style only); needed for hosted endpoints whose gateway drops "
+                        "long non-streamed requests. Does not change the model's output")
     p.add_argument("--extra-body", metavar="JSON", help="JSON object merged into every request body")
     p.add_argument("--retry-errors", action="store_true", help="rerun problems whose request failed")
     p.add_argument("--force", action="store_true", help="discard recorded responses and run again")

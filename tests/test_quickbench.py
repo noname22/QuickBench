@@ -560,6 +560,24 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(awarded["end-state"], 3)  # the order was cancelled before the model broke down
         self.assertEqual(awarded["reply"], 0)      # but there never was a reply
 
+    def test_streamed_completions_match_the_non_streamed_shape(self):
+        name = "Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
+        with FakeServer() as server:
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m", "--stream")
+            self.assertEqual(code, 0, out)
+            self.assertTrue(all(body.get("stream") for path, body, _ in server.requests
+                                if path == "/v1/chat/completions"))
+        result = self.root / "public/results" / name
+        tool = json.loads((result / "responses/tool-lookup.json").read_text())
+        first, second = tool["turns"][0]["steps"]
+        self.assertEqual(first["tool_calls"][0]["arguments"], {"order_id": "A-1"})  # assembled from 3 deltas
+        self.assertEqual(first["tool_calls"][0]["result"], '{"status": "shipped"}')
+        self.assertEqual(first["reasoning"], "let me think about it")
+        self.assertEqual(second["text"], "answer 1")
+        self.assertEqual(second["finish_reason"], "stop")
+        run = json.loads((result / "run.json").read_text())
+        self.assertEqual(run["totals"]["output_tokens"], 28)
+
     def test_generic_server_and_api_errors(self):
         with FakeServer(llamacpp=False) as server:
             server.httpd.fail_with = 500

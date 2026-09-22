@@ -56,6 +56,33 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, {"error": "not found"})
 
+    def _stream_chat(self, body: dict) -> None:
+        """The same fake model as the non-streamed path, delivered as server-sent events in small deltas."""
+        has_result = any(m["role"] == "tool" for m in body["messages"])
+        chunks = [{"delta": {"role": "assistant", "reasoning_content": "let me "}},
+                  {"delta": {"reasoning_content": "think about it"}}]
+        if body.get("tools") and not has_result:
+            name = body["tools"][0]["function"]["name"]
+            chunks += [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                                                   "function": {"name": name, "arguments": ""}}]}},
+                       {"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"order_'}}]}},
+                       {"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'id": "A-1"}'}}]}},
+                       {"delta": {}, "finish_reason": "tool_calls"}]
+        else:
+            n = sum(m["role"] == "user" for m in body["messages"])
+            chunks += [{"delta": {"content": "answer "}}, {"delta": {"content": str(n)}},
+                       {"delta": {}, "finish_reason": "stop"}]
+        events = [{"model": self.server.model_path, "choices": [{"index": 0, **c}]} for c in chunks]
+        events.append({"model": self.server.model_path, "choices": [],
+                       "usage": {"prompt_tokens": 10, "completion_tokens": 7}})
+        payload = "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+        data = payload.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append((self.path, body, dict(self.headers)))
@@ -64,6 +91,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/tokenize" and (self.server.llamacpp or getattr(self.server, "router_models", None)):
             self._send(200, {"tokens": body["content"].split()})
+        elif self.path == "/v1/chat/completions" and body.get("stream"):
+            self._stream_chat(body)
         elif self.path == "/v1/chat/completions":
             if self.server.fail_with:
                 return self._send(self.server.fail_with, {"error": "boom"})
