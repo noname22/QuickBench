@@ -187,7 +187,12 @@ class OpenAIConversation(Conversation):
 
         # Echo the assistant message back as received so templates with interleaved
         # thinking still see their reasoning during tool loops.
-        self.messages.append({k: v for k, v in message.items() if v is not None})
+        stored = {k: v for k, v in message.items() if v is not None}
+        if not stored.get("content") and not stored.get("tool_calls"):
+            # A reasoning-only (cut off) turn has no content; llama.cpp refuses to
+            # replay an assistant message without content or tool calls.
+            stored["content"] = ""
+        self.messages.append(stored)
 
         text = message.get("content") or ""
         if isinstance(text, list):  # content parts
@@ -251,7 +256,7 @@ class OpenAIConversation(Conversation):
                     args = fn.get("arguments") or ""
                     slot["function"]["arguments"] += args if isinstance(args, str) else json.dumps(args)
                 finish = choice.get("finish_reason") or finish
-        message = {"role": "assistant", "content": "".join(text) or None}
+        message = {"role": "assistant", "content": "".join(text)}
         if reasoning:
             message["reasoning_content"] = "".join(reasoning)
         if calls:
