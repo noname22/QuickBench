@@ -289,9 +289,9 @@ class EndToEndTest(unittest.TestCase):
                 # Sampling parameters are not sent unless asked for.
                 chat = [body for path, body, _ in server.requests if path.startswith("/v1/")]
                 self.assertTrue(all("temperature" not in body for body in chat))
-                # The output token limit defaults to a generous 65536.
-                self.assertTrue(all(body["max_tokens"] == 65536 for body in chat))
-                self.assertEqual(run["generation"]["max_tokens"], 65536)
+                # The output token limit defaults to a generous 131072.
+                self.assertTrue(all(body["max_tokens"] == 131072 for body in chat))
+                self.assertEqual(run["generation"]["max_tokens"], 131072)
 
         code, out = self.cli("status")
         self.assertIn("2 ungraded", out)
