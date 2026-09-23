@@ -56,11 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="reasoning effort to request (sent as reasoning_effort; e.g. low, medium, high, xhigh - "
                         "what a model accepts is its own; a llama.cpp server is asked before anything runs). "
                         "Part of the result name. Default: none sent, the model's own default applies")
-    p.add_argument("--force-answer", action="store_true",
+    p.add_argument("--force-answer", action=argparse.BooleanOptionalAction, default=True,
                    help="when a reply hits the token limit while still reasoning, make the model answer from the "
                         "reasoning it had (llama.cpp: continue its reasoning with a time-is-up note; other APIs: "
-                        "a follow-up message). Also applies to already recorded responses. Forced answers are "
-                        "marked in the log, the response and the report")
+                        "a follow-up message). On by default; also applies to already recorded responses. Forced "
+                        "answers are marked in the log, the response and the report. --no-force-answer records "
+                        "the cut-off reply as it is")
     p.add_argument("--retry-errors", action="store_true", help="rerun problems whose request failed")
     p.add_argument("--force", action="store_true", help="discard recorded responses and run again")
     p.set_defaults(func=run)

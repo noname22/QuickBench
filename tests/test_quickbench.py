@@ -592,7 +592,8 @@ class EndToEndTest(unittest.TestCase):
         response_file.unlink()
         with FakeServer() as server:
             server.httpd.truncate_reasoning = True
-            self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m", "--filter", "int-plain")
+            self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m", "--filter", "int-plain",
+                     "--no-force-answer")
             self.assertEqual(json.loads(response_file.read_text())["turns"][-1]["steps"][-1]["finish_reason"],
                              "length")
             code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
