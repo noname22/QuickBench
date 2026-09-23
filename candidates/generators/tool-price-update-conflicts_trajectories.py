@@ -143,7 +143,7 @@ def talk_only():
 expect(P, "ideal", ideal())
 expect(P, "empty", empty_response(P), zero=True)
 expect(P, "talk only, zeros in the labels", talk_only(), zero=True)
-expect(P, "alternative: read all first, reverse order, change log", alternative())
+expect(P, "alternative: read all first, reverse order, change log", alternative(), lost={"answer-format": 0})  # its summary lines are in bold
 expect(P, "flawed: stale block resent with the new version", flawed_resend_stale(),
        lost={"conflict-reprice": 0, "conflict-preserve": 0})
 expect(P, "flawed: everything listed, locked item forced, wrong pot set", flawed_everything_listed_forced(),
