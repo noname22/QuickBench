@@ -13,6 +13,7 @@ scored with quickbench.report.auto_awards. `expect` asserts which criteria lose 
 
 from __future__ import annotations
 
+import os
 import json
 import sys
 from pathlib import Path
@@ -28,7 +29,7 @@ FAILURES: list[str] = []
 
 
 def load(problem_id: str):
-    return load_problem(ROOT / "candidates" / "public" / "problems" / f"{problem_id}.toml", "public")
+    return load_problem(ROOT / "candidates" / os.environ.get("QB_SET", "public") / "problems" / f"{problem_id}.toml", os.environ.get("QB_SET", "public"))
 
 
 class Session:

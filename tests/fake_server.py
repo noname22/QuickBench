@@ -32,6 +32,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/props" and self.server.llamacpp:
             self._send(200, {"model_path": self.server.model_path, "model_ftype": "Q8_0",
                              "build_info": "b11023-4ff829ec2",
+                             "chat_template": "{%- set reasoning_effort = reasoning_effort|default('xhigh') %}",
+                             "chat_template_caps": {"supports_reasoning_effort": True},
                              "default_generation_settings": {"n_ctx": 4096, "params": {"temperature": 0.7}}})
         elif self.path == "/v1/models":
             model_id = self.server.model_path if self.server.llamacpp else "served-model-name"
@@ -85,12 +87,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _apply_template(self, body: dict) -> None:
+        """A ChatML-like template with a reasoning effort setting and <think> blocks."""
+        effort = body.get("reasoning_effort", "xhigh")
+        if effort not in ("low", "medium", "xhigh"):
+            return self._send(500, {"error": {"code": 500, "message": f"Unexpected reasoning effort {effort}. "
+                                              "Supported types are xhigh (default), medium, and low."}})
+        out = [f"<|system|>effort {effort}\n"]
+        for m in body["messages"]:
+            if m["role"] == "assistant" and m.get("reasoning_content"):
+                out.append(f"<|assistant|>\n<think>\n{m['reasoning_content']}\n</think>\n\n{m.get('content') or ''}")
+            else:
+                out.append(f"<|{m['role']}|>{m.get('content') or ''}\n")
+        if body.get("add_generation_prompt", True):
+            out.append("<|assistant|>\n<think>\n")
+        self._send(200, {"prompt": "".join(out)})
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append((self.path, body, dict(self.headers)))
         if getattr(self.server, "refuse_chat", False) and self.path.startswith("/v1/"):
             self.connection.close()  # the client sees a dropped connection
             return
+        if self.path == "/apply-template" and self.server.llamacpp:
+            return self._apply_template(body)
+        if self.path == "/completion" and self.server.llamacpp:
+            return self._send(200, {"content": " forced answer", "tokens_predicted": 3, "stop_type": "eos"})
         if self.path == "/tokenize" and (self.server.llamacpp or getattr(self.server, "router_models", None)):
             self._send(200, {"tokens": body["content"].split()})
         elif self.path == "/v1/chat/completions" and body.get("stream"):
@@ -98,6 +120,17 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/v1/chat/completions":
             if self.server.fail_with:
                 return self._send(self.server.fail_with, {"error": "boom"})
+            if self.server.truncate_reasoning:  # every reply runs out of tokens while still thinking
+                last = body["messages"][-1]
+                if last["role"] == "user" and "thinking budget" in (last.get("content") or ""):
+                    message = {"role": "assistant", "content": "follow-up answer"}
+                    finish = "stop"
+                else:
+                    message = {"role": "assistant", "content": "", "reasoning_content": "long thought"}
+                    finish = "length"
+                return self._send(200, {"model": self.server.model_path,
+                                        "choices": [{"message": message, "finish_reason": finish}],
+                                        "usage": {"prompt_tokens": 10, "completion_tokens": 7}})
             if self.server.scripted:  # a grading model: canned replies in order
                 message = {"role": "assistant", "content": self.server.scripted.pop(0)}
                 return self._send(200, {"model": "grader", "choices": [{"message": message, "finish_reason": "stop"}],
@@ -144,6 +177,7 @@ class FakeServer:
         self.httpd.requests = []
         self.httpd.fail_with = None
         self.httpd.scripted = []
+        self.httpd.truncate_reasoning = False
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
 

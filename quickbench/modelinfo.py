@@ -109,10 +109,12 @@ def describe_kv_cache(k: str, v: str) -> str:
     return f"K: {full.get(k, k)}, V: {full.get(v, v)}"
 
 
-def result_dir_name(model_name: str, cache_k: str, cache_v: str) -> str:
+def result_dir_name(model_name: str, cache_k: str, cache_v: str, effort: str | None = None) -> str:
     name = safe_dir_name(model_name)
     if (cache_k, cache_v) != ("f16", "f16"):
         name += f"-k{cache_k}-v{cache_v}"
+    if effort:
+        name += f"-effort-{safe_dir_name(effort)}"
     return name
 
 
@@ -149,7 +151,8 @@ def probe(root: str, api: str, api_key: str | None, model: str | None = None) ->
         headers.setdefault("anthropic-version", "2023-06-01")
 
     info: dict = {"reported_model": None, "quantization": None, "engine": None, "n_params": None, "n_ctx": None,
-                  "server_sampling_defaults": None, "tokenize": False, "router": False, "kv_cache": (None, None)}
+                  "server_sampling_defaults": None, "tokenize": False, "router": False, "kv_cache": (None, None),
+                  "llamacpp": False, "reasoning": {"supports_effort": None, "default_effort": None}}
 
     props = _get(root + "/props", headers)
     if isinstance(props, dict) and props.get("role") == "router":
@@ -174,6 +177,10 @@ def probe(root: str, api: str, api_key: str | None, model: str | None = None) ->
                 "seed")
         info["server_sampling_defaults"] = {k: params[k] for k in keep if k in params} or None
         info["tokenize"] = True
+        info["llamacpp"] = True
+        from .forcing import template_reasoning
+
+        info["reasoning"] = template_reasoning(props)
 
     models = _get(root + "/v1/models", headers)
     entries = models.get("data") if isinstance(models, dict) else None

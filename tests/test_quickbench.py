@@ -529,6 +529,79 @@ class EndToEndTest(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("tags must be a non-empty list", out)
 
+    def test_reasoning_effort(self):
+        name = "Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
+        with FakeServer() as server:
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
+                                 "--filter", "int-plain")
+            self.assertEqual(code, 0, out)
+            run = json.loads((self.root / "public/results" / name / "run.json").read_text())
+            self.assertEqual(run["reasoning"], {"effort": "xhigh", "source": "chat template default",
+                                                "template_supports_effort": True})
+
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
+                                 "--filter", "int-plain", "--reasoning-effort", "low")
+            self.assertEqual(code, 0, out)
+            chats = [b for path, b, _ in server.requests if path == "/v1/chat/completions"]
+            self.assertEqual(chats[-1]["reasoning_effort"], "low")
+            run = json.loads((self.root / "public/results" / (name + "-effort-low") / "run.json").read_text())
+            self.assertEqual(run["reasoning"]["effort"], "low")
+            self.assertEqual(run["reasoning"]["source"], "requested")
+
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
+                                 "--filter", "int-plain", "--reasoning-effort", "bogus")
+            self.assertEqual(code, 2)
+            self.assertIn("Supported types are xhigh", out)
+
+    def test_forced_answers(self):
+        name = "Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
+        response_file = self.root / "public/results" / name / "responses/int-plain.json"
+        # llama.cpp: the model continues its own reasoning after a time-is-up note and the template's closing tag.
+        with FakeServer() as server:
+            server.httpd.truncate_reasoning = True
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
+                                 "--filter", "int-plain", "--force-answer")
+            self.assertEqual(code, 0, out)
+            self.assertIn("continuing the model's reasoning", out)
+            self.assertIn("answer FORCED", out)
+            completion = [b for path, b, _ in server.requests if path == "/completion"]
+            self.assertEqual(len(completion), 2)  # one per turn
+            self.assertTrue(completion[0]["prompt"].endswith(
+                "<|user|>first\n<|assistant|>\n<think>\nlong thought"
+                "\n\nI have run out of thinking time, so I must stop here and give my final answer now.\n</think>\n\n"))
+        response = json.loads(response_file.read_text())
+        last = response["turns"][-1]["steps"][-1]
+        self.assertEqual((last["text"], last["finish_reason"], last["forced"]["method"]),
+                         ("forced answer", "forced", "continuation"))
+        self.assertEqual(response["turns"][0]["steps"][0]["finish_reason"], "length")  # the cut-off reply is kept
+        self.cli("report")
+        summary = json.loads((self.root / "public/results" / name / "summary.json").read_text())
+        self.assertEqual(summary["graders"]["-"]["forced"], 1)
+
+        # Other APIs: a follow-up message hands the reasoning back.
+        with FakeServer(llamacpp=False) as server:
+            server.httpd.truncate_reasoning = True
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
+                                 "--filter", "int-plain", "--force-answer")
+            self.assertEqual(code, 0, out)
+        response = json.loads((self.root / "public/results/served-model-name/responses/int-plain.json").read_text())
+        last = response["turns"][-1]["steps"][-1]
+        self.assertEqual((last["text"], last["forced"]["method"]), ("follow-up answer", "follow-up"))
+
+        # After the fact: a recorded run without forcing gets its final answer forced on resume.
+        response_file.unlink()
+        with FakeServer() as server:
+            server.httpd.truncate_reasoning = True
+            self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m", "--filter", "int-plain")
+            self.assertEqual(json.loads(response_file.read_text())["turns"][-1]["steps"][-1]["finish_reason"],
+                             "length")
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
+                                 "--filter", "int-plain", "--force-answer")
+            self.assertEqual(code, 0, out)
+            self.assertIn("1 to run", out)
+        last = json.loads(response_file.read_text())["turns"][-1]["steps"][-1]
+        self.assertEqual((last["text"], last["finish_reason"]), ("forced answer", "forced"))
+
     def test_several_endpoints_share_the_work(self):
         for i in range(6):
             (self.root / f"public/problems/int-extra-{i}.toml").write_text(
