@@ -626,6 +626,22 @@ class EndToEndTest(unittest.TestCase):
         run = json.loads((result / "run.json").read_text())
         self.assertEqual(run["totals"]["output_tokens"], 28)
 
+    def test_a_cut_off_stream_is_a_failed_request(self):
+        name = "Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
+        with FakeServer() as server:
+            server.httpd.cut_stream = True
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m", "--stream",
+                                 "--filter", "int-plain")
+            self.assertIn("stream ended before the model finished", out)
+        response = json.loads((self.root / "public/results" / name / "responses/int-plain.json").read_text())
+        self.assertIn("no finish reason", response["error"])
+        with FakeServer() as server:
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m", "--stream",
+                                 "--filter", "int-plain", "--retry-errors")
+            self.assertEqual(code, 0, out)
+        response = json.loads((self.root / "public/results" / name / "responses/int-plain.json").read_text())
+        self.assertIsNone(response["error"])
+
     def test_generic_server_and_api_errors(self):
         with FakeServer(llamacpp=False) as server:
             server.httpd.fail_with = 500

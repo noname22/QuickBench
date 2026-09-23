@@ -75,6 +75,8 @@ class Handler(BaseHTTPRequestHandler):
         events = [{"model": self.server.model_path, "choices": [{"index": 0, **c}]} for c in chunks]
         events.append({"model": self.server.model_path, "choices": [],
                        "usage": {"prompt_tokens": 10, "completion_tokens": 7}})
+        if getattr(self.server, "cut_stream", False):  # the stream stops early: no finish reason, no usage
+            events = events[:3]
         payload = "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
         data = payload.encode()
         self.send_response(200)

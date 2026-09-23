@@ -256,12 +256,17 @@ class OpenAIConversation(Conversation):
                     args = fn.get("arguments") or ""
                     slot["function"]["arguments"] += args if isinstance(args, str) else json.dumps(args)
                 finish = choice.get("finish_reason") or finish
+        if finish is None:
+            # A stream that stops without a finish reason was cut off (the gateway or the provider dropped it); the
+            # partial output is not the model's answer. Fail the request so that --retry-errors reruns it.
+            raise ApiError(f"the stream ended before the model finished (no finish reason; {len(''.join(text))} "
+                           f"characters of answer and {len(''.join(reasoning))} of reasoning received)")
         message = {"role": "assistant", "content": "".join(text)}
         if reasoning:
             message["reasoning_content"] = "".join(reasoning)
         if calls:
             message["tool_calls"] = [calls[i] for i in sorted(calls)]
-        return {"choices": [{"message": message, "finish_reason": finish or "stop"}], "usage": usage or {},
+        return {"choices": [{"message": message, "finish_reason": finish}], "usage": usage or {},
                 "model": model}
 
     def add_tool_results(self, results: list[tuple[ToolCall, str]]) -> None:
