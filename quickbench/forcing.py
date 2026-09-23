@@ -96,17 +96,42 @@ def continue_reasoning(conv, root: str, api_key: str | None, reasoning: str, clo
     return (data.get("content") or "").strip(), int(data.get("tokens_predicted") or 0)
 
 
-def follow_up(conv, reasoning: str) -> tuple[str, int]:
-    """Any API: ask for the final answer in a follow-up message that hands the reasoning back."""
-    n, saved = len(conv.messages), conv.max_tokens
-    conv.add_user(FOLLOWUP.format(reasoning=reasoning[-FOLLOWUP_CHARS:]))
-    conv.max_tokens = FORCE_TOKENS
+NO_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def follow_up(conv, reasoning: str) -> tuple[str, int, bool]:
+    """Any API: ask for the final answer in a follow-up message that hands the reasoning back. Returns the answer,
+    the tokens spent and whether thinking had to be switched off to get one."""
+    n, saved_tokens, saved_body = len(conv.messages), conv.max_tokens, conv.extra_body
+    tokens, text, thinking_off = 0, "", False
     try:
-        step = conv.complete()
+        for attempt in ("as is", "thinking off"):
+            del conv.messages[n:]
+            conv.add_user(FOLLOWUP.format(reasoning=reasoning[-FOLLOWUP_CHARS:]))
+            conv.max_tokens = FORCE_TOKENS
+            if attempt == "thinking off":
+                kwargs = {**(saved_body.get("chat_template_kwargs") or {}), **NO_THINKING["chat_template_kwargs"]}
+                conv.extra_body = {**saved_body, "chat_template_kwargs": kwargs}
+            try:
+                step = conv.complete()
+            except ApiError:
+                if attempt == "as is":
+                    raise
+                break  # the API does not take the switch; keep the empty answer
+            tokens += step.output_tokens
+            text = step.text.strip()
+            if text:
+                thinking_off = attempt == "thinking off"
+                break
     finally:
         del conv.messages[n:]  # the conversation goes on as if the model had answered directly
-        conv.max_tokens = saved
-    return step.text.strip(), step.output_tokens
+        conv.max_tokens, conv.extra_body = saved_tokens, saved_body
+    return text, tokens, thinking_off
+
+
+def forced_empty(step: dict) -> bool:
+    """A forced answer that came back empty (worth forcing again)."""
+    return step.get("finish_reason") == "forced" and not (step.get("text") or "").strip()
 
 
 def needs_forcing(step: dict) -> bool:
@@ -122,8 +147,8 @@ def force_answer(conv, endpoint: dict, api_key: str | None, reasoning: str) -> d
         text, tokens = continue_reasoning(conv, endpoint["root"], api_key, reasoning, closing)
         method = "continuation"
     else:
-        text, tokens = follow_up(conv, reasoning)
-        method = "follow-up"
+        text, tokens, thinking_off = follow_up(conv, reasoning)
+        method = "follow-up, thinking off" if thinking_off else "follow-up"
     # Later turns see the forced answer as the model's reply.
     conv.messages[-1] = {"role": "assistant", "content": text}
     return {"text": text, "reasoning": "", "tool_calls": [], "finish_reason": "forced", "forced": {"method": method},

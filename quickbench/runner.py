@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import __version__
 from .clients import CONVERSATIONS, ApiError, ConnectionFailed, RunAborted, normalize_base_url
-from .forcing import check_effort, closing_sequence, force_answer, needs_forcing
+from .forcing import check_effort, closing_sequence, force_answer, forced_empty, needs_forcing
 from .modelinfo import (TokenCounter, describe_kv_cache, parse_model_name, probe, result_dir_name,
                         safe_dir_name)
 from .problems import SETS, TAGS, Problem, load_problems
@@ -141,7 +141,10 @@ def can_force_recorded(response: dict, api: str) -> bool:
     turns = response.get("turns") or []
     if api != "openai" or response.get("error") or response.get("aborted") or not turns or not turns[-1]["steps"]:
         return False
-    return needs_forcing(turns[-1]["steps"][-1])
+    steps = turns[-1]["steps"]
+    if forced_empty(steps[-1]) and len(steps) > 1:  # an earlier attempt got no answer: try again
+        steps = steps[:-1]
+    return needs_forcing(steps[-1])
 
 
 def force_recorded(problem: Problem, ctx: dict, endpoint: dict, response: dict) -> dict:
@@ -152,6 +155,10 @@ def force_recorded(problem: Problem, ctx: dict, endpoint: dict, response: dict) 
         problem.max_tokens or ctx["max_tokens"], ctx["sampling"], ctx["extra_body"], ctx["timeout"],
         stream=ctx["stream"],
     )
+    response = json.loads(json.dumps(response))
+    last = response["turns"][-1]["steps"]
+    if forced_empty(last[-1]):
+        last.pop()
     for user, turn in zip(problem.turns, response["turns"]):
         conv.add_user(user)
         for step in turn["steps"]:
@@ -165,10 +172,10 @@ def force_recorded(problem: Problem, ctx: dict, endpoint: dict, response: dict) 
             conv.messages.append(message)
             for c in step.get("tool_calls") or []:
                 conv.messages.append({"role": "tool", "tool_call_id": c["id"], "content": c["result"]})
-    forced = force_answer(conv, endpoint, ctx["api_key"], response["turns"][-1]["steps"][-1]["reasoning"])
-    response = json.loads(json.dumps(response))
-    response["turns"][-1]["steps"].append(forced)
+    forced = force_answer(conv, endpoint, ctx["api_key"], last[-1]["reasoning"])
+    last.append(forced)
     response["usage"]["output_tokens"] += forced["output_tokens"]
+    response["revised_at"] = now()  # grades of the version without the forced answer no longer count
     return response
 
 

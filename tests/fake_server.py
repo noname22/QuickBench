@@ -122,7 +122,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(self.server.fail_with, {"error": "boom"})
             if self.server.truncate_reasoning:  # every reply runs out of tokens while still thinking
                 last = body["messages"][-1]
-                if last["role"] == "user" and "thinking budget" in (last.get("content") or ""):
+                thinking_off = (body.get("chat_template_kwargs") or {}).get("enable_thinking") is False
+                if last["role"] == "user" and "thinking budget" in (last.get("content") or "") and (
+                        thinking_off or not self.server.rethink):
                     message = {"role": "assistant", "content": "follow-up answer"}
                     finish = "stop"
                 else:
@@ -178,6 +180,7 @@ class FakeServer:
         self.httpd.fail_with = None
         self.httpd.scripted = []
         self.httpd.truncate_reasoning = False
+        self.httpd.rethink = False  # the follow-up thinks again (and runs out) unless thinking is switched off
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
 
