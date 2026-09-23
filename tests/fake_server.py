@@ -96,6 +96,10 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/v1/chat/completions":
             if self.server.fail_with:
                 return self._send(self.server.fail_with, {"error": "boom"})
+            if self.server.scripted:  # a grading model: canned replies in order
+                message = {"role": "assistant", "content": self.server.scripted.pop(0)}
+                return self._send(200, {"model": "grader", "choices": [{"message": message, "finish_reason": "stop"}],
+                                        "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
             if getattr(self.server, "garble_after_tool", False) and any(m["role"] == "tool" for m in body["messages"]):
                 return self._send(500, {"error": {"code": 500, "message": "The model produced output that does "
                                                   "not match the expected peg-native format"}})
@@ -137,6 +141,7 @@ class FakeServer:
         self.httpd.model_path = model_path
         self.httpd.requests = []
         self.httpd.fail_with = None
+        self.httpd.scripted = []
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
 
