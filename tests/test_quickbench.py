@@ -549,6 +549,13 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(run["reasoning"]["source"], "requested")
 
             code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
+                                 "--filter", "int-plain", "--extra-body",
+                                 '{"chat_template_kwargs": {"reasoning_effort": "medium"}}')
+            self.assertEqual(code, 0, out)
+            run = json.loads((self.root / "public/results" / (name + "-effort-medium") / "run.json").read_text())
+            self.assertEqual((run["reasoning"]["effort"], run["reasoning"]["source"]), ("medium", "requested"))
+
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m",
                                  "--filter", "int-plain", "--reasoning-effort", "bogus")
             self.assertEqual(code, 2)
             self.assertIn("Supported types are xhigh", out)

@@ -290,6 +290,12 @@ def run(args) -> int:
                   file=sys.stderr)
             return 2
         extra_body = {**extra_body, "reasoning_effort": effort}
+    else:
+        # An effort can also be passed in --extra-body, top-level or as a chat template argument (vLLM-style
+        # servers such as Chutes pass chat_template_kwargs to the template but check reasoning_effort against
+        # their own list); it is recorded and named the same way.
+        effort = extra_body.get("reasoning_effort") or (extra_body.get("chat_template_kwargs") or {}).get(
+            "reasoning_effort")
 
     if not args.max_tokens:  # 0: no limit
         args.max_tokens = None
