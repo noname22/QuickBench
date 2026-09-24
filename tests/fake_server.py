@@ -120,6 +120,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/v1/chat/completions":
             if self.server.fail_with:
                 return self._send(self.server.fail_with, {"error": "boom"})
+            if self.server.filter_word and any(self.server.filter_word in (m.get("content") or "")
+                                               for m in body["messages"] if m["role"] == "user"):
+                message = {"role": "assistant", "content": None, "refusal": "blocked by the content filter"}
+                return self._send(200, {"model": self.server.model_path,
+                                        "choices": [{"message": message, "finish_reason": "content_filter"}],
+                                        "usage": {"prompt_tokens": 10, "completion_tokens": 0}})
             if self.server.truncate_reasoning:  # every reply runs out of tokens while still thinking
                 last = body["messages"][-1]
                 thinking_off = (body.get("chat_template_kwargs") or {}).get("enable_thinking") is False
@@ -180,6 +186,7 @@ class FakeServer:
         self.httpd.fail_with = None
         self.httpd.scripted = []
         self.httpd.truncate_reasoning = False
+        self.httpd.filter_word = None  # the provider refuses conversations whose user messages contain this word
         self.httpd.rethink = False  # the follow-up thinks again (and runs out) unless thinking is switched off
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)

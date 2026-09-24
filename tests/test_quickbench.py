@@ -646,6 +646,23 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual([s["finish_reason"] for s in steps], ["length", "forced"])
         self.assertEqual(steps[-1]["text"], "follow-up answer")
 
+    def test_refusals_are_counted_apart(self):
+        name = "Swift-Qwen3.8-27B-Uncensored-MTP-Q8_0"
+        with FakeServer() as server:
+            server.httpd.filter_word = "first"  # int-plain's first turn
+            code, out = self.cli("run", "--api", "openai", "--base-url", server.url, "--model", "m")
+            self.assertEqual(code, 0, out)
+            self.assertIn("REFUSED", out)
+        for problem, criterion, points in (("int-plain", "right", 0), ("tool-lookup", "call", 1)):
+            verdict = json.dumps({"criteria": {criterion: {"points": points, "rationale": "r"}}})
+            self.assertEqual(self.cli("grade", name, problem, "--grader", "t", stdin=verdict)[0], 0)
+        code, out = self.cli("report")
+        self.assertIn("(1 refused)", out)
+        self.assertIn("100.0 on the 1 problems it was not refused", out)
+        summary = json.loads((self.root / "public/results" / name / "summary.json").read_text())["graders"]["t"]
+        self.assertEqual(summary["refused"], 1)
+        self.assertEqual(summary["overall"]["public"]["score"], 0.5)  # the refusal counts as 0 here
+
     def test_several_endpoints_share_the_work(self):
         for i in range(6):
             (self.root / f"public/problems/int-extra-{i}.toml").write_text(
